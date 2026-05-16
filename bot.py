@@ -1012,9 +1012,10 @@ async def _resolve_ball(ctx, game_id: int) -> None:
         )
 
 # FLIP
-    async def cmd_flip(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        result = random.choice(["🪙 Heads!", "🪙 Tails!"])
-    await update.message.reply_text(result)        
+# FLIP
+async def cmd_flip(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    result = random.choice(["🪙 Heads!", "🪙 Tails!"])
+    await update.message.reply_text(result)    
 
 
 # ──────────────────────────────────────────────────────────────────────────────
