@@ -824,10 +824,14 @@ async def cb_pick(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             await ctx.bot.edit_message_text(
                 chat_id=game["chat_id"],
                 message_id=game_id,
-                text=build_game_text(game),
-                reply_markup=number_keyboard(game_id),
-                parse_mode="Markdown",
-            )
+                text=(
+                    build_game_text(game) +
+                    f"\n\n🏏 *{game['batter']['name']}* chose: *{num}*\n"
+                    f"🎳 Waiting for *{game['bowler']['name']}* to pick..."
+        ),
+        reply_markup=number_keyboard(game_id),
+        parse_mode="Markdown",
+    )
         except Exception:
             pass
         return
@@ -866,17 +870,20 @@ async def _resolve_ball(ctx, game_id: int) -> None:
 
     # ── Reveal both picks ────────────────────────────────────────────────────
     is_wicket   = bat_num == bowl_num
-    runs_word   = "runs" if bat_num > 1 else "run"
-    result_text = "💥 *Same number — WICKET!*" if is_wicket else f"✅ *{bat_num} {runs_word}!*"
+runs_word   = "runs" if bat_num > 1 else "run"
+result_text = "💥 *Same number — WICKET!*" if is_wicket else f"✅ *{bat_num} {runs_word}!*"
 
-    await ctx.bot.send_message(
-        chat_id,
+await ctx.bot.edit_message_text(
+    chat_id=chat_id,
+    message_id=game_id,
+    text=(
         f"🏏 *{game['batter']['name']}* chose: *{bat_num}*\n"
         f"🎳 *{game['bowler']['name']}* chose: *{bowl_num}*\n"
         f"{'━' * 20}\n"
-        f"{result_text}",
-        parse_mode="Markdown",
-    )
+        f"{result_text}"
+    ),
+    parse_mode="Markdown",
+)
 
     if bat_num == bowl_num:
         # ── WICKET ────────────────────────────────────────────────────────────
