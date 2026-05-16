@@ -857,12 +857,12 @@ async def _resolve_ball(ctx, game_id: int) -> None:
     bowl_num = game["bowler_pick"]
 
     # Save bowler's last number before resetting
-    game["last_bowl_num"] = bowl_num
+game["last_bowl_num"] = bowl_num
 
-    # Reset for next ball
-    game["batter_pick"] = None
-    game["bowler_pick"] = None
-    game["pick_phase"]  = "batter"
+# Reset for next ball
+game["batter_pick"] = None
+game["bowler_pick"] = None
+game["pick_phase"]  = "batter"
 
     game["ball"]         += 1
     game["batter_balls"] += 1
