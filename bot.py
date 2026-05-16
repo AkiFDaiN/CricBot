@@ -141,9 +141,32 @@ def api_get(endpoint: str, params: dict = None) -> dict | None:
 
 def get_live_matches() -> list[dict]:
     data = api_get("currentMatches")
+
+    if not data:
+        data = api_get("matches")
+
     if not data:
         return []
-    return [m for m in data.get("data", []) if m.get("matchStarted") and not m.get("matchEnded")]
+
+    matches = data.get("data", [])
+
+    live_matches = []
+
+    for m in matches:
+        status = (m.get("status") or "").lower()
+
+        is_live = (
+            m.get("matchStarted") is True
+            and not m.get("matchEnded", False)
+        ) or (
+            "live" in status
+            or "in progress" in status
+        )
+
+        if is_live:
+            live_matches.append(m)
+
+    return live_matches
 
 
 def get_upcoming_matches() -> list[dict]:
@@ -302,7 +325,6 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         "• /gamecricket — Play Cricket!\n"
         "• /profile — Your Cricket stats\n"
         "• /help — This message\n\n"
-        "Multiple Cricket games can run at the same time in a group! 🎉"
     )
     await update.message.reply_text(text, parse_mode="Markdown")
 
@@ -316,7 +338,8 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         "/gamecricket — Start a Cricket game\n"
         "/profile — View your wins, losses & draws\n"
         "/cache — Cache status (add `clear` to reset)\n"
-        "/start — Welcome message\n\n"
+        "/start — Welcome message\n"
+        "/help — This message\n\n"
         "_Powered by CricketData.org_"
     )
     await update.message.reply_text(text, parse_mode="Markdown")
@@ -841,6 +864,20 @@ async def _resolve_ball(ctx, game_id: int) -> None:
     ball    = game["ball"]
     chat_id = game["chat_id"]
 
+    # ── Reveal both picks ────────────────────────────────────────────────────
+    is_wicket   = bat_num == bowl_num
+    runs_word   = "runs" if bat_num > 1 else "run"
+    result_text = "💥 *Same number — WICKET!*" if is_wicket else f"✅ *{bat_num} {runs_word}!*"
+
+    await ctx.bot.send_message(
+        chat_id,
+        f"🏏 *{game['batter']['name']}* chose: *{bat_num}*\n"
+        f"🎳 *{game['bowler']['name']}* chose: *{bowl_num}*\n"
+        f"{'━' * 20}\n"
+        f"{result_text}",
+        parse_mode="Markdown",
+    )
+
     if bat_num == bowl_num:
         # ── WICKET ────────────────────────────────────────────────────────────
 
@@ -1015,3 +1052,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
