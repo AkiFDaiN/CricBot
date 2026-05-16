@@ -37,8 +37,9 @@ from telegram.ext import (
 # ─────────────────────────────────────────────
 #  🔑  CONFIGURATION  – fill these in!
 # ─────────────────────────────────────────────
-TELEGRAM_TOKEN  = "8752527498:AAEsJsk2VVxUIonR5_VFyQNrMGVZ4pLn7OA"
-CRICKET_API_KEY = "56109a8a-5fda-4985-a4da-bac4459f6e03"
+import os
+TELEGRAM_TOKEN  = os.environ.get("TELEGRAM_TOKEN")
+CRICKET_API_KEY = os.environ.get("CRICKET_API_KEY")
 
 CRICKET_BASE_URL = "https://api.cricapi.com/v1"
 
@@ -638,7 +639,7 @@ async def cmd_gamecricket(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
 
     msg = await update.message.reply_text(
         f"🏏 *{challenger.first_name}* wants to play Cricket!\n\n"
-        "Anyone, tap *Join Game* to play! 👇",
+        "Anyone — tap *Join Game* to play! 👇",
         reply_markup=InlineKeyboardMarkup([[
             InlineKeyboardButton("🏏 Join Game!", callback_data="hc_join:0")
         ]]),
