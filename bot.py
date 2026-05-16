@@ -525,7 +525,7 @@ def build_game_text(game: dict) -> str:
 bowl_line = f"🎳 Bowler's last: *{last_bowl}*" if last_bowl is not None else ""
 lines += ["", f"🕐 This over: {dots_str}", bowl_line, ""]
 
-    if pick_phase == "batter":
+if pick_phase == "batter":
         lines += [
             f"⏳ Waiting for *{batter}* (batter) to pick...",
             f"🔒 *{bowler}* (bowler) picks after batter",
