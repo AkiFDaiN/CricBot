@@ -1011,6 +1011,11 @@ async def _resolve_ball(ctx, game_id: int) -> None:
             parse_mode="Markdown",
         )
 
+# FLIP
+    async def cmd_flip(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        result = random.choice(["🪙 Heads!", "🪙 Tails!"])
+    await update.message.reply_text(result)        
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  MAIN
@@ -1021,6 +1026,7 @@ def main() -> None:
 
     app.add_handler(CommandHandler("start",       cmd_start))
     app.add_handler(CommandHandler("help",        cmd_help))
+    app.add_handler(CommandHandler("flip",        cmd_flip))
     app.add_handler(CommandHandler("live",        cmd_live))
     app.add_handler(CommandHandler("score",       cmd_score))
     app.add_handler(CommandHandler("schedule",    cmd_schedule))
