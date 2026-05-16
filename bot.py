@@ -521,7 +521,9 @@ def build_game_text(game: dict) -> str:
         need = target - score
         lines.append(f"🎯 Target: {target}  |  Need: *{need}*")
 
-    lines += ["", f"🕐 This over: {dots_str}", ""]
+    last_bowl = game.get("last_bowl_num")
+bowl_line = f"🎳 Bowler's last: *{last_bowl}*" if last_bowl is not None else ""
+lines += ["", f"🕐 This over: {dots_str}", bowl_line, ""]
 
     if pick_phase == "batter":
         lines += [
@@ -853,6 +855,9 @@ async def _resolve_ball(ctx, game_id: int) -> None:
     game     = hand_cricket_games.get(game_id)
     bat_num  = game["batter_pick"]
     bowl_num = game["bowler_pick"]
+
+    # Save bowler's last number before resetting
+    game["last_bowl_num"] = bowl_num
 
     # Reset for next ball
     game["batter_pick"] = None
