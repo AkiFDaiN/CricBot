@@ -868,22 +868,21 @@ async def _resolve_ball(ctx, game_id: int) -> None:
     ball    = game["ball"]
     chat_id = game["chat_id"]
 
-    # ── Reveal both picks ────────────────────────────────────────────────────
     is_wicket   = bat_num == bowl_num
-runs_word   = "runs" if bat_num > 1 else "run"
-result_text = "💥 *Same number — WICKET!*" if is_wicket else f"✅ *{bat_num} {runs_word}!*"
+    runs_word   = "runs" if bat_num > 1 else "run"
+    result_text = "💥 *Same number — WICKET!*" if is_wicket else f"✅ *{bat_num} {runs_word}!*"
 
-await ctx.bot.edit_message_text(
-    chat_id=chat_id,
-    message_id=game_id,
-    text=(
-        f"🏏 *{game['batter']['name']}* chose: *{bat_num}*\n"
-        f"🎳 *{game['bowler']['name']}* chose: *{bowl_num}*\n"
-        f"{'━' * 20}\n"
-        f"{result_text}"
-    ),
-    parse_mode="Markdown",
-)
+    await ctx.bot.edit_message_text(
+        chat_id=chat_id,
+        message_id=game_id,
+        text=(
+            f"🏏 *{game['batter']['name']}* chose: *{bat_num}*\n"
+            f"🎳 *{game['bowler']['name']}* chose: *{bowl_num}*\n"
+            f"{'━' * 20}\n"
+            f"{result_text}"
+        ),
+        parse_mode="Markdown",
+    )
 
     if bat_num == bowl_num:
         # ── WICKET ────────────────────────────────────────────────────────────
