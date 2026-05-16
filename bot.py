@@ -508,6 +508,8 @@ def build_game_text(game: dict) -> str:
     recent       = history[-6:] if history else []
     dots_str     = "  ".join(recent) if recent else "-"
     pick_phase   = game.get("pick_phase", "batter")
+    last_bowl    = game.get("last_bowl_num")
+    bowl_line    = f"🎳 Bowler's last: *{last_bowl}*" if last_bowl is not None else ""
 
     lines = [
         "🏏 *CRICKET*",
@@ -521,11 +523,9 @@ def build_game_text(game: dict) -> str:
         need = target - score
         lines.append(f"🎯 Target: {target}  |  Need: *{need}*")
 
-    last_bowl = game.get("last_bowl_num")
-bowl_line = f"🎳 Bowler's last: *{last_bowl}*" if last_bowl is not None else ""
-lines += ["", f"🕐 This over: {dots_str}", bowl_line, ""]
+    lines += ["", f"🕐 This over: {dots_str}", bowl_line, ""]
 
-if pick_phase == "batter":
+    if pick_phase == "batter":
         lines += [
             f"⏳ Waiting for *{batter}* (batter) to pick...",
             f"🔒 *{bowler}* (bowler) picks after batter",
@@ -857,12 +857,12 @@ async def _resolve_ball(ctx, game_id: int) -> None:
     bowl_num = game["bowler_pick"]
 
     # Save bowler's last number before resetting
-game["last_bowl_num"] = bowl_num
+    game["last_bowl_num"] = bowl_num
 
-# Reset for next ball
-game["batter_pick"] = None
-game["bowler_pick"] = None
-game["pick_phase"]  = "batter"
+    # Reset for next ball
+    game["batter_pick"] = None
+    game["bowler_pick"] = None
+    game["pick_phase"]  = "batter"
 
     game["ball"]         += 1
     game["batter_balls"] += 1
@@ -898,6 +898,7 @@ game["pick_phase"]  = "batter"
                 history=[],
                 batter_pick=None, bowler_pick=None,
                 pick_phase="batter",
+                last_bowl_num=None,
             )
             await ctx.bot.edit_message_text(
                 chat_id=chat_id,
@@ -932,7 +933,6 @@ game["pick_phase"]  = "batter"
                 parse_mode="Markdown",
             )
 
-            # ── DRAW: chasing batter dismissed on exact same score ─────────────
             if score2 == score1:
                 result_line = f"📊 Both innings ended at *{score1}* runs — incredible game!"
                 record_result(game["batter"]["id"], game["batter"]["name"], won=False, draw=True)
@@ -943,9 +943,7 @@ game["pick_phase"]  = "batter"
                     text=build_final_scorecard(game, result_line, winner_name=None),
                     parse_mode="Markdown",
                 )
-
             else:
-                # Normal result: below target = bowler wins; at or above = batter wins
                 if score2 >= target:
                     winner      = game["batter"]
                     loser       = game["bowler"]
@@ -973,7 +971,6 @@ game["pick_phase"]  = "batter"
         game["batter_runs"] += bat_num
         game["history"].append(str(bat_num))
 
-        # Target chased (not out)?
         if game["innings"] == 2 and game["score"] >= game["target"]:
             game["innings2_scorecard"] = {
                 "batter_name": game["batter"]["name"],
@@ -999,7 +996,6 @@ game["pick_phase"]  = "batter"
             del hand_cricket_games[game_id]
             return
 
-        # Over complete?
         if ball % 6 == 0:
             await ctx.bot.send_message(
                 chat_id,
