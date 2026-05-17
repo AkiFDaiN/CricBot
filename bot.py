@@ -1595,7 +1595,7 @@ async def cb_team_pick(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             return
         bof["bowler_pick"] = num
         await query.answer(f"Picked {num} 🤫")
-        await _cancel_timer(tgame_id)
+        _cancel_timer(tgame_id)
         await _team_resolve(ctx, tgame_id)
 
 
