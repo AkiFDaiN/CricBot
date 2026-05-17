@@ -1,9 +1,10 @@
 """
 Specific requirements handled:
-  1. Menu protection limits mode configuration access to the /gamecricket commander.
-  2. Captain claims collapse automatically via inline message editing.
-  3. Performance weights track and calculate match MVP at final whistle.
-  4. Bowler names explicitly mapped into over summaries.
+  1. Bowler name explicitly added to the 1v1 end-of-over summary message.
+  2. Menu protection limits mode configuration access to the /gamecricket commander.
+  3. Captain claims collapse automatically via inline message editing.
+  4. Performance weights track and calculate match MVP at final whistle.
+  5. Bowler names explicitly mapped into over summaries for both modes.
 """
 import logging
 import random
@@ -227,7 +228,6 @@ async def cmd_profile(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_gamecricket(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     _cache_user(user)
-    # Inject Commander ID to restrict initialization configurations
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("⚔️ 1v1",        callback_data=f"mode:1v1:{user.id}")],
         [InlineKeyboardButton("🏟️ Team Mode", callback_data=f"mode:team:{user.id}")],
@@ -606,9 +606,11 @@ async def _duel_resolve(ctx, game_id: int) -> None:
             ov_balls  = g["history"][-6:]
             runs_ov   = sum(int(b) for b in ov_balls if b.lstrip("-").isdigit())
             extra     = f"  |  Need: *{g['target'] - g['score']}*" if g.get("target") else ""
+            # Includes Bowler Name in 1v1 summary as requested
             await ctx.bot.send_message(
                 chat_id,
                 f"📋 *End of Over {ball // 6}*\n"
+                f"🎳 Bowler: *{g['bowler']['name']}*\n"
                 f"Balls: {' | '.join(ov_balls)}\nRuns: *{runs_ov}*\n\n"
                 f"🏏 *{g['batter']['name']}*: *{g['batter_runs']}* off *{g['batter_balls']}* balls\n"
                 f"📊 Total: *{g['score']}*{extra}",
@@ -876,7 +878,7 @@ async def cmd_remove(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 # ─────────────────────────────────────────────────────────────
-#  Join Team / Captain Dashboard Message Strategy Collapse
+#  Join Team / Automated Captain Self-Claim Dashboard Message
 # ─────────────────────────────────────────────────────────────
 async def cb_team_join(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
@@ -905,13 +907,11 @@ async def cb_team_join(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await query.answer(f"Joined {_tname(tgame, team)}!")
     await _refresh_setup(ctx, tgame)
     
-    # Send a single claim message per team (instead of spawning updates continuously)
     await _send_team_claim_msg(ctx, tgame, team)
 
 
 async def _send_team_claim_msg(ctx, tgame, team):
     tdata = tgame[f"team_{team}"]
-    # Block processing if captain exists or a claim block is already live
     if tdata["captain_id"] or tdata.get("claim_msg_id") is not None:
         return
         
@@ -956,7 +956,6 @@ async def cb_team_claim_cap(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> N
     tdata["captain_name"] = user.first_name
     
     await query.answer("Captain status successfully updated!")
-    # Collapses the message block inline smoothly as specified
     await query.edit_message_text(
         text=f"✅ *{user.first_name}* is the captain of *{_tname(tgame, team)}*!",
         reply_markup=None,
@@ -1517,7 +1516,7 @@ async def cb_team_pick(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             return
         bof["bowler_pick"] = num
         await query.answer(f"Picked {num} 🤫")
-        _cancel_timer(tgame_id)
+        await _cancel_timer(tgame_id)
         await _team_resolve(ctx, tgame_id)
 
 
@@ -1590,7 +1589,6 @@ async def _team_resolve(ctx, tgame_id: int) -> None:
             ov_balls = bof["over_history"][-6:]
             runs_ov  = sum(int(b) for b in ov_balls if b.isdigit())
             extra    = f"  |  Need: *{tgame['target'] - d['score']}*" if tgame.get("target") else ""
-            # Includes Bowler Name as requested
             await ctx.bot.send_message(
                 chat_id,
                 f"📋 *End of Over {ov_num}*\n"
