@@ -1,9 +1,9 @@
 """
 Specific requirements handled:
-  1. Modified 1v1 interface panel layout logic to remove normal 'Batter's last' references.
-  2. Injected a dynamic 'This over: ...' history string tracker that activates explicitly following a wicket fall ('W').
-  3. Preserved instant fast-resolve 1v1 coin flip choice endpoints.
-  4. Preserved clean automated team configurations, single-message dashboards, and MVP weights.
+  1. Wicket messages in 1v1 mode now dynamically print all prior delivery outcomes inside that over leading up to the wicket.
+  2. Removed 'This over: ...' string data from live 1v1 and Team Mode button game interface panels.
+  3. Replaced with '🏏 Batter's last: X' to print the immediate previous ball runs scored (hidden after a wicket).
+  4. Preserved clean automated team configurations, single-message dashboards, fast tosses, and MVP weights.
 """
 import logging
 import random
@@ -280,7 +280,6 @@ def _duel_text(g: dict) -> str:
     last_bowl = g.get("last_bowl_num")
     bowl_line = f"🎳 Bowler's last: *{last_bowl}*" if last_bowl is not None else "🎳 Bowler's last: -"
     
-    # NEW: Over history string injected dynamically ONLY if a wicket drops ('W')
     recent_history = "  ".join(g.get("history", [])[-6:]) or "-"
     is_wicket_state = "W" in g.get("history", [])[-1:]
     
@@ -295,7 +294,7 @@ def _duel_text(g: dict) -> str:
     
     lines += [""]
     if is_wicket_state:
-        lines.append(f"🕐 This over: {recent_history}")
+        lines.append(f"🕐 This over till out: *{recent_history}*")
     else:
         last_bat = g.get("last_bat_num")
         bat_line = f"🏏 Batter's last: *{last_bat}*" if last_bat is not None else "🏏 Batter's last: -"
@@ -421,7 +420,7 @@ async def cb_duel_join(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         chat_id=g["chat_id"], message_id=game_id,
         text=(
             f"🏏 *1v1 CRICKET — TOSS*\n\n"
-            f"f\"👤 *{caller_name}* gets to guess the coin land side first!\n\n"
+            f"👤 *{caller_name}* gets to guess the coin land side first!\n\n"
             f"*{caller_name}*, make your call:"
         ),
         reply_markup=InlineKeyboardMarkup([[
@@ -567,22 +566,29 @@ async def _duel_resolve(ctx, game_id: int) -> None:
         return
     bat_n  = g["batter_pick"]
     bowl_n = g["bowler_pick"]
-    g.update(last_bowl_num=bowl_n, last_bat_num=bat_n, batter_pick=None, bowler_pick=None, pick_phase="batter")
-    g["ball"]         += 1
-    g["batter_balls"] += 1
-    ball    = g["ball"]
     chat_id = g["chat_id"]
-    ov, b_in = divmod(ball, 6)
-    sr = round((g["batter_runs"] / g["batter_balls"]) * 100, 1) if g["batter_balls"] else 0.0
 
     if bat_n == bowl_n:
         g["history"].append("W")
+        # Extract everything scored in the current over sequence *before* this out delivery
+        over_ball_index = g["ball"] % 6
+        prior_over_balls = g["history"][-over_ball_index-1:] if over_ball_index > 0 else ["W"]
+        over_progression_log = " | ".join(prior_over_balls)
+
+        g.update(last_bowl_num=bowl_n, last_bat_num=bat_n, batter_pick=None, bowler_pick=None, pick_phase="batter")
+        g["ball"]         += 1
+        g["batter_balls"] += 1
+        ov, b_in = divmod(g["ball"], 6)
+        sr = round((g["batter_runs"] / g["batter_balls"]) * 100, 1) if g["batter_balls"] else 0.0
+
+        # REVISED: Edited wicket announcement template to map historical inputs until out delivery directly
         wkt_text = (
             f"💥 *WICKET!*\n\n"
-            f"🏏 *{g['batter']['name']}* OUT for *{g['batter_runs']}* off *{g['batter_balls']}* balls  SR {sr}\n"
+            f"🏏 *{g['batter']['name']}* OUT for *{g['batter_runs']}* out of *{g['batter_balls']}* deliveries  SR {sr}\n"
             f"🎳 Bowled by *{g['bowler']['name']}*\n"
-            f"⚡ Ball *{ov}.{b_in}*  |  Score: *{g['score']}*"
+            f"⚡ Over ball: *{ov}.{b_in}*  |  Score: *{g['score']}*  `[Over path: {over_progression_log}]`"
         )
+        
         if g["innings"] == 1:
             g["innings1_scorecard"] = {
                 "batter_name": g["batter"]["name"], "bowler_name": g["bowler"]["name"],
@@ -636,6 +642,12 @@ async def _duel_resolve(ctx, game_id: int) -> None:
         g["score"]       += bat_n
         g["batter_runs"] += bat_n
         g["history"].append(str(bat_n))
+        g.update(last_bowl_num=bowl_n, last_bat_num=bat_n, batter_pick=None, bowler_pick=None, pick_phase="batter")
+        g["ball"]         += 1
+        g["batter_balls"] += 1
+        ball = g["ball"]
+        ov, b_in = divmod(ball, 6)
+        
         if g["innings"] == 2 and g["score"] >= g["target"]:
             g["innings2_scorecard"] = {
                 "batter_name": g["batter"]["name"], "bowler_name": g["bowler"]["name"],
@@ -672,9 +684,9 @@ async def _duel_resolve(ctx, game_id: int) -> None:
         )
 
 
-# ─────────────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════
 #  TEAM MODE — HELPERS
-# ─────────────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════
 def _tname(tgame: dict, key: str) -> str:
     return tgame[f"team_{key}"]["name"]
 
@@ -1006,7 +1018,7 @@ async def cb_team_claim_cap(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> N
     
     await query.answer("Captain status successfully updated!")
     await query.edit_message_text(
-        text=f"✅ *{user.first_name}* is the captain of *{_tname(tgame, team)}*!",
+        text=f"👑 *{_tname(tgame, team)} Captain Settled!*\n🏆 *{user.first_name}* clicked the button and claimed full strategic leadership!",
         reply_markup=None,
         parse_mode="Markdown"
     )
@@ -1707,6 +1719,88 @@ async def _end_innings1(ctx, tgame_id: int) -> None:
         parse_mode="Markdown",
     )
     _reset_timer(ctx, tgame_id)
+
+
+async def _end_match(ctx, tgame_id: int) -> None:
+    tgame = team_games.get(tgame_id)
+    if not tgame:
+        return
+    _cancel_timer(tgame_id)
+    chat_id = tgame["chat_id"]
+    d1      = tgame["innings_data"][1]
+    d2      = tgame["innings_data"][2]
+    bat1    = tgame.get("innings1_batting_team", "a")
+    bat2    = tgame.get("innings2_batting_team", "b")
+    s1, s2  = d1["score"], d2["score"]
+
+    if s2 > s1:
+        winner_key  = bat2
+        result_line = f"🎯 *{_tname(tgame, bat2)}* chased the target and won!"
+    elif s2 == s1:
+        winner_key  = None
+        result_line = f"🤝 Match tied at *{s1}* runs!"
+    else:
+        winner_key  = bat1
+        margin      = s1 - s2
+        result_line = f"🛡️ *{_tname(tgame, bat1)}* defended — won by *{margin}* run{'s' if margin != 1 else ''}!"
+
+    for t in ["a", "b"]:
+        won  = (winner_key == t) if winner_key else False
+        draw = (winner_key is None)
+        for uid, uname in tgame[f"team_{t}"]["members"].items():
+            record_result(uid, uname, won=won, draw=draw)
+
+    # ── MVP ENGINE COMPUTATION MATRIX ─────────────────────────
+    player_perf = {}
+    def process_mvp(d, team_key):
+        for uid, uname in tgame[f"team_{team_key}"]["members"].items():
+            if uid not in player_perf:
+                player_perf[uid] = {"name": uname, "runs": 0, "wickets": 0}
+            player_perf[uid]["runs"] += d["batter_runs"].get(uid, 0)
+            player_perf[uid]["wickets"] += d.get("bowler_wickets", {}).get(uid, 0)
+
+    process_mvp(d1, "a")
+    process_mvp(d1, "b")
+    process_mvp(d2, "a")
+    process_mvp(d2, "b")
+
+    mvp_name, max_weight = None, -1
+    for uid, stats in player_perf.items():
+        weight = stats["runs"] + (stats["wickets"] * 20)
+        if weight > max_weight and (stats["runs"] > 0 or stats["wickets"] > 0):
+            max_weight = weight
+            mvp_name = f"🏅 *MVP:* *{stats['name']}* ({stats['runs']} runs | {stats['wickets']} wickets)"
+
+    mvp_line = mvp_name if mvp_name else "🏅 *MVP:* None (No performance records)"
+    # ──────────────────────────────────────────────────────────
+
+    def bat_summary(d, bat_key):
+        lines = []
+        for uid, uname in tgame[f"team_{bat_key}"]["members"].items():
+            runs   = d["batter_runs"].get(uid)
+            balls_b = d["batter_balls"].get(uid, 0)
+            if runs is None:
+                lines.append(f"  {uname}: DNB")
+            else:
+                sr = round((runs / balls_b) * 100, 1) if balls_b else 0.0
+                lines.append(f"  *{uname}*: *{runs}* ({balls_b}b)  SR {sr}")
+        return "\n".join(lines) or "  (none)"
+
+    outcome   = f"🏆 *{_tname(tgame, winner_key)}* WINS!" if winner_key else "🤝 *MATCH TIED!*"
+    scorecard = (
+        f"🏆 *MATCH OVER*\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"*Innings 1 — {_tname(tgame, bat1)}*\n{bat_summary(d1, bat1)}\n"
+        f"Total: *{s1}/{d1['wickets']}*\n\n"
+        f"*Innings 2 — {_tname(tgame, bat2)}*\n{bat_summary(d2, bat2)}\n"
+        f"Total: *{s2}/{d2['wickets']}*\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n{result_line}\n{outcome}\n\n"
+        f"{mvp_line}\n\n"
+        f"Play again with /gamecricket 🏏"
+    )
+    await ctx.bot.send_message(chat_id, scorecard, parse_mode="Markdown")
+    tgame["phase"] = "finished"
+    del team_games[tgame_id]
+    group_team_game.pop(chat_id, None)
 
 
 # ─────────────────────────────────────────────────────────────
