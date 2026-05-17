@@ -1,9 +1,9 @@
 """
 Specific requirements handled:
-  1. Wicket messages in 1v1 mode now dynamically print all prior delivery outcomes inside that over leading up to the wicket.
-  2. Removed 'This over: ...' string data from live 1v1 and Team Mode button game interface panels.
-  3. Replaced with '🏏 Batter's last: X' to print the immediate previous ball runs scored (hidden after a wicket).
-  4. Preserved clean automated team configurations, single-message dashboards, fast tosses, and MVP weights.
+  1. Strict Game Commander Locking: Only the user who sent /gamecricket can choose the mode and the 1v1 variant.
+  2. Over history tracking dynamically updates the wicket message frame in 1v1 mode.
+  3. Replaced 'This over: ...' with '🏏 Batter's last: X' in normal live play interfaces.
+  4. Preserved clean team configuration, automated inline captain claims, and final match MVPs.
 """
 import logging
 import random
@@ -225,10 +225,12 @@ async def cmd_profile(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_gamecricket(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    _cache_user(update.effective_user)
+    user = update.effective_user
+    _cache_user(user)
+    # Lock menu callbacks strictly to the sender's Telegram user_id
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("⚔️ 1v1",        callback_data="mode:1v1")],
-        [InlineKeyboardButton("🏟️ Team Mode", callback_data="mode:team")],
+        [InlineKeyboardButton("⚔️ 1v1",        callback_data=f"mode:1v1:{user.id}")],
+        [InlineKeyboardButton("🏟️ Team Mode", callback_data=f"mode:team:{user.id}")],
     ])
     await update.message.reply_text(
         "🏏 *Choose Game Mode:*",
@@ -239,13 +241,23 @@ async def cmd_gamecricket(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
 
 async def cb_mode_select(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    _cache_user(update.effective_user)
+    user = update.effective_user
+    _cache_user(user)
+    
+    parts = query.data.split(":")
+    choice = parts[1]
+    creator_id = int(parts[2])
+    
+    # Validation constraint checks
+    if user.id != creator_id:
+        await query.answer("🛑 Only the commander who sent /gamecricket can use this menu!", show_alert=True)
+        return
+        
     await query.answer()
-    choice = query.data.split(":")[1]
     if choice == "1v1":
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔢 With 5  (1–6)",             callback_data="1v1v:with5")],
-            [InlineKeyboardButton("0️⃣ Without 5  (0,1,2,3,4,6)", callback_data="1v1v:no5")],
+            [InlineKeyboardButton("🔢 With 5  (1–6)",             callback_data=f"1v1v:with5:{creator_id}")],
+            [InlineKeyboardButton("0️⃣ Without 5  (0,1,2,3,4,6)", callback_data=f"1v1v:no5:{creator_id}")],
         ])
         await query.edit_message_text(
             "⚔️ *1v1 — Choose variant:*", reply_markup=kb, parse_mode="Markdown"
@@ -347,15 +359,24 @@ def _duel_scorecard(g: dict, result_line: str, winner_name: str = None) -> str:
 
 async def cb_1v1_variant(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    challenger = update.effective_user
-    _cache_user(challenger)
+    user = update.effective_user
+    _cache_user(user)
+    
+    parts = query.data.split(":")
+    variant = parts[1]
+    creator_id = int(parts[2])
+    
+    # Constraint verification for variant selector options
+    if user.id != creator_id:
+        await query.answer("🛑 Only the commander who sent /gamecricket can choose the variant parameters!", show_alert=True)
+        return
+        
     await query.answer()
-    variant = query.data.split(":")[1]
-    get_profile(challenger.id, challenger.first_name)
+    get_profile(user.id, user.first_name)
     g = {
         "variant": variant,
         "chat_id": update.effective_chat.id,
-        "challenger": {"id": challenger.id, "name": challenger.first_name},
+        "challenger": {"id": user.id, "name": user.first_name},
         "opponent": None,
         "batter": None, "bowler": None,
         "score": 0, "target": None,
@@ -371,7 +392,7 @@ async def cb_1v1_variant(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     }
     label = "With 5 (1–6)" if variant == "with5" else "Without 5 (0,1,2,3,4,6)"
     msg = await query.edit_message_text(
-        f"🏏 *{challenger.first_name}* wants to play Cricket! ({label})\n\nTap *Join Game* to play! 👇",
+        f"🏏 *{user.first_name}* wants to play Cricket! ({label})\n\nTap *Join Game* to play! 👇",
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏏 Join Game!", callback_data="dj:0")]]),
         parse_mode="Markdown",
     )
@@ -570,7 +591,6 @@ async def _duel_resolve(ctx, game_id: int) -> None:
 
     if bat_n == bowl_n:
         g["history"].append("W")
-        # Extract everything scored in the current over sequence *before* this out delivery
         over_ball_index = g["ball"] % 6
         prior_over_balls = g["history"][-over_ball_index-1:] if over_ball_index > 0 else ["W"]
         over_progression_log = " | ".join(prior_over_balls)
@@ -581,7 +601,6 @@ async def _duel_resolve(ctx, game_id: int) -> None:
         ov, b_in = divmod(g["ball"], 6)
         sr = round((g["batter_runs"] / g["batter_balls"]) * 100, 1) if g["batter_balls"] else 0.0
 
-        # REVISED: Edited wicket announcement template to map historical inputs until out delivery directly
         wkt_text = (
             f"💥 *WICKET!*\n\n"
             f"🏏 *{g['batter']['name']}* OUT for *{g['batter_runs']}* out of *{g['batter_balls']}* deliveries  SR {sr}\n"
@@ -1003,10 +1022,7 @@ async def cb_team_claim_cap(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> N
     tdata = tgame[f"team_{team}"]
     if tdata["captain_id"]:
         await query.answer("Captain already assigned!")
-        try:
-            await query.edit_message_reply_markup(reply_markup=None)
-        except Exception:
-            pass
+        await query.edit_message_reply_markup(reply_markup=None)
         return
         
     if user.id not in tdata["members"]:
@@ -1571,6 +1587,7 @@ async def _team_resolve(ctx, tgame_id: int) -> None:
 
     if bat_n == bowl_n:
         d["wickets"] += 1
+        d.setdefault("bowler_wickets", {})[bowler_id] = d.setdefault("bowler_wickets", {}).get(bowler_id, 0) + 1
         bof["over_history"].append("W")
         d["history"].append("W")
         wkt_text = (
@@ -1617,6 +1634,7 @@ async def _team_resolve(ctx, tgame_id: int) -> None:
             await ctx.bot.send_message(
                 chat_id,
                 f"📋 *End of Over {ov_num}*\n"
+                f"🎳 Bowler: *{bowler_name}*\n"
                 f"Balls: {' | '.join(ov_balls)}\nRuns: *{runs_ov}*\n\n"
                 f"📊 *{_tname(tgame, tgame['batting_team'])}*: *{d['score']}/{d['wickets']}*{extra}",
                 parse_mode="Markdown",
@@ -1847,7 +1865,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(cb_team_toss,        pattern=r"^ttoss:"))
     app.add_handler(CallbackQueryHandler(cb_team_pick,        pattern=r"^tp:"))
 
-    logger.info("CricBot is active with dynamic wicket telemetry loops…")
+    logger.info("CricBot is active with locked configuration permissions…")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
