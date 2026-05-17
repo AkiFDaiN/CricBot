@@ -1,9 +1,9 @@
 """
 Specific requirements handled:
-  1. Group admins completely stripped of standard overrides. They are treated as ordinary group members unless they are the Host or Captain.
-  2. Host can manage setup settings, configure lineups (/batting & /bowling), but cannot vote in captain elections.
-  3. Captains handle tosses, numeric ball selections, and can declare innings.
-  4. Captain election executes entirely through a single-message team dashboard.
+  1. Multi-user voting system replaced with a direct "Self-Claim" captaincy button.
+  2. Only verified teammates who have joined the team can claim its captaincy.
+  3. Host and opposing team are restricted from claiming roles.
+  4. All host management and captain game permissions are fully preserved.
 """
 import logging
 import random
@@ -761,7 +761,7 @@ async def cmd_endgame(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("No active team game in this chat.")
         return
     tgame = team_games.get(tgame_id)
-    if tgame and user.id != tgame["host_id"]:
+    if tgame choke and user.id != tgame["host_id"]:
         await update.message.reply_text("🛑 Only the host can terminate active matches.")
         return
     if tgame:
@@ -857,7 +857,7 @@ async def cmd_remove(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 # ─────────────────────────────────────────────────────────────
-#  Join Team / Automated Teammate Captain Voting Logic
+#  Join Team / Automated Captain Self-Claim Dashboard Message
 # ─────────────────────────────────────────────────────────────
 async def cb_team_join(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
@@ -886,35 +886,32 @@ async def cb_team_join(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await query.answer(f"Joined {_tname(tgame, team)}!")
     await _refresh_setup(ctx, tgame)
     
-    # Render interactive team voting profile
-    await _send_team_vote_msg(ctx, tgame, team)
+    # Fire up the single-message direct claim interface
+    await _send_team_claim_msg(ctx, tgame, team)
 
 
-async def _send_team_vote_msg(ctx, tgame, team):
+async def _send_team_claim_msg(ctx, tgame, team):
     tdata = tgame[f"team_{team}"]
     if tdata["captain_id"]:
         return
         
-    buttons = []
-    for uid, uname in tdata["members"].items():
-        buttons.append([InlineKeyboardButton(f"🗳️ Vote {uname}", callback_data=f"tvote:{tgame['game_msg_id']}:{team}:{uid}")])
-        
-    if not buttons:
-        return
-        
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton(f"👑 I am the Captain of {_tname(tgame, team)}", callback_data=f"tclaim_cap:{tgame['game_msg_id']}:{team}")
+    ]])
+    
     await ctx.bot.send_message(
         chat_id=tgame["chat_id"],
-        text=f"👑 *{_tname(tgame, team)} Captain Election*\n⚠️ *Note:* Host and opponents locked out. Teammates click below to elect your leader!",
-        reply_markup=InlineKeyboardMarkup(buttons),
+        text=f"🏟️ *{_tname(tgame, team)} Captaincy Declaration*\nVerification rule: If you joined this side, click below to take charge!",
+        reply_markup=kb,
         parse_mode="Markdown"
     )
 
 
-async def cb_team_vote(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+async def cb_team_claim_cap(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     user = update.effective_user
     parts = query.data.split(":")
-    tgame_id, team, target_uid = int(parts[1]), parts[2], int(parts[3])
+    tgame_id, team = int(parts[1]), parts[2]
     
     tgame = team_games.get(tgame_id)
     if not tgame:
@@ -927,19 +924,17 @@ async def cb_team_vote(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await query.edit_message_reply_markup(reply_markup=None)
         return
         
-    # Enforce teammate verification
+    # Enforce verified teammate rule
     if user.id not in tdata["members"]:
-        await query.answer("🛑 Access Denied! Only teammates on this side can vote.", show_alert=True)
+        await query.answer(f"🛑 Access Denied! You must join {_tname(tgame, team)} first to declare yourself captain.", show_alert=True)
         return
         
-    target_uid = int(target_uid)
-    name = tdata["members"].get(target_uid, "?")
-    tdata["captain_id"] = target_uid
-    tdata["captain_name"] = name
+    tdata["captain_id"] = user.id
+    tdata["captain_name"] = user.first_name
     
-    await query.answer(f"{name} elected Captain!")
+    await query.answer("Captain status successfully updated!")
     await query.edit_message_text(
-        text=f"👑 *{_tname(tgame, team)} Election Complete!*\n\nTeammate *{user.first_name}* voted.\n🏆 *{name}* is now officially your Captain!",
+        text=f"👑 *{_tname(tgame, team)} Captain Settled!*\n🏆 *{user.first_name}* clicked the button and claimed full strategic leadership!",
         reply_markup=None,
         parse_mode="Markdown"
     )
@@ -1301,7 +1296,6 @@ async def cmd_batting(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if ctx.args and ctx.args[0].lower() == "me":
         target_id, target_name = user.id, user.first_name
     else:
-        # Authorization matrix verification checkpoint
         if user.id != tgame[f"team_{bk}"]["captain_id"] and user.id != tgame["host_id"]:
             await update.message.reply_text("🛑 Lineups can only be mapped by your Team Captain or the Game Host.")
             return
@@ -1763,7 +1757,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(cb_duel_pick,        pattern=r"^dp:"))
     
     app.add_handler(CallbackQueryHandler(cb_team_join,        pattern=r"^tj:"))
-    app.add_handler(CallbackQueryHandler(cb_team_vote,        pattern=r"^tvote:"))
+    app.add_handler(CallbackQueryHandler(cb_team_claim_cap,   pattern=r"^tclaim_cap:"))
     app.add_handler(CallbackQueryHandler(cb_set_overs,        pattern=r"^tsetovers:"))
     app.add_handler(CallbackQueryHandler(cb_overs_pick,       pattern=r"^tov:"))
     
@@ -1779,7 +1773,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(cb_team_toss,        pattern=r"^ttoss:"))
     app.add_handler(CallbackQueryHandler(cb_team_pick,        pattern=r"^tp:"))
 
-    logger.info("CricBot is active with finalized role permissions…")
+    logger.info("CricBot is active with direct captain claim actions…")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
