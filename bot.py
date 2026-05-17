@@ -1,9 +1,10 @@
 """
 Specific requirements handled:
-  1. Strict Game Commander Locking: Only the user who sent /gamecricket can choose the mode and the 1v1 variant.
-  2. Over history tracking dynamically updates the wicket message frame in 1v1 mode.
-  3. Replaced 'This over: ...' with '🏏 Batter's last: X' in normal live play interfaces.
-  4. Preserved clean team configuration, automated inline captain claims, and final match MVPs.
+  1. Fixed sanitation on /batting and /bowling to allow 'me' selections seamlessly.
+  2. Strict Game Commander Locking: Only the user who sent /gamecricket can choose the mode and 1v1 variant.
+  3. Over history tracking dynamically updates the wicket message frame in 1v1 mode.
+  4. Replaced 'This over: ...' with '🏏 Batter's last: X' in normal live play interfaces.
+  5. Preserved clean team configuration, automated inline captain claims, and final match MVPs.
 """
 import logging
 import random
@@ -227,7 +228,6 @@ async def cmd_profile(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_gamecricket(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     _cache_user(user)
-    # Lock menu callbacks strictly to the sender's Telegram user_id
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("⚔️ 1v1",        callback_data=f"mode:1v1:{user.id}")],
         [InlineKeyboardButton("🏟️ Team Mode", callback_data=f"mode:team:{user.id}")],
@@ -248,7 +248,6 @@ async def cb_mode_select(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     choice = parts[1]
     creator_id = int(parts[2])
     
-    # Validation constraint checks
     if user.id != creator_id:
         await query.answer("🛑 Only the commander who sent /gamecricket can use this menu!", show_alert=True)
         return
@@ -366,7 +365,6 @@ async def cb_1v1_variant(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     variant = parts[1]
     creator_id = int(parts[2])
     
-    # Constraint verification for variant selector options
     if user.id != creator_id:
         await query.answer("🛑 Only the commander who sent /gamecricket can choose the variant parameters!", show_alert=True)
         return
@@ -1365,10 +1363,7 @@ async def cb_team_toss(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 # ─────────────────────────────────────────────────────────────
-#  /batting AND /bowling COMMANDS (CO-MANAGED BY HOST & CAPTAIN)
-# ─────────────────────────────────────────────────────────────
-# ─────────────────────────────────────────────────────────────
-#  CORRECTED /batting ME AND /bowling ME COMMAND STRUCTURES
+#  /batting AND /bowling COMMANDS WITH FIXED "ME" PROCESSING Logic
 # ─────────────────────────────────────────────────────────────
 async def cmd_batting(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id  = update.effective_chat.id
@@ -1382,7 +1377,7 @@ async def cmd_batting(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
     bk = tgame["batting_team"]
 
-    # FIX: Safely evaluate if argument is 'me' or fallback to user mention
+    # FIXED: Sanitized whitespace trailing checking layers
     if ctx.args and ctx.args[0].strip().lower() == "me":
         target_id, target_name = user.id, user.first_name
     else:
@@ -1420,7 +1415,7 @@ async def cmd_bowling(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
     wk = _bowl_key(tgame)
 
-    # FIX: Safely evaluate if argument is 'me' or fallback to user mention
+    # FIXED: Sanitized whitespace trailing checking layers
     if ctx.args and ctx.args[0].strip().lower() == "me":
         target_id, target_name = user.id, user.first_name
     else:
@@ -1453,6 +1448,30 @@ async def cmd_bowling(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 # ═════════════════════════════════════════════════════════════
 #  TEAM FIELD — BALL-BY-BALL GAME FIELD DISPLAY
 # ═════════════════════════════════════════════════════════════
+def _ensure_bof(tgame: dict) -> dict:
+    if tgame.get("balls_on_field") is None:
+        tgame["balls_on_field"] = {
+            "msg_id":      None,
+            "batter_id":   None, "batter_name": None,
+            "bowler_id":   None, "bowler_name": None,
+            "batter_pick": None, "bowler_pick": None,
+            "pick_phase":  "batter",
+            "last_bowl_num": None, "last_bat_num": None,
+            "over_history":  [],
+        }
+    return tgame["balls_on_field"]
+
+
+def _team_kb(tgame_id: int, variant: str) -> InlineKeyboardMarkup:
+    if variant == "with5":
+        r1 = [InlineKeyboardButton(str(n), callback_data=f"tp:{tgame_id}:{n}") for n in [1, 2, 3]]
+        r2 = [InlineKeyboardButton(str(n), callback_data=f"tp:{tgame_id}:{n}") for n in [4, 5, 6]]
+    else:
+        r1 = [InlineKeyboardButton(str(n), callback_data=f"tp:{tgame_id}:{n}") for n in [0, 1, 2]]
+        r2 = [InlineKeyboardButton(str(n), callback_data=f"tp:{tgame_id}:{n}") for n in [3, 4, 6]]
+    return InlineKeyboardMarkup([r1, r2])
+
+
 def _team_field_text(tgame: dict) -> str:
     inn        = tgame["current_innings"]
     bof        = tgame["balls_on_field"]
@@ -1505,6 +1524,21 @@ def _team_field_text(tgame: dict) -> str:
             f"👇 *{bowler_name}*, pick:",
         ]
     return "\n".join(l for l in lines if l is not None)
+
+
+async def _launch_ball_game(ctx, tgame_id: int) -> None:
+    tgame = team_games.get(tgame_id)
+    if not tgame:
+        return
+    bof = tgame["balls_on_field"]
+    msg = await ctx.bot.send_message(
+        tgame["chat_id"],
+        _team_field_text(tgame),
+        reply_markup=_team_kb(tgame_id, tgame["variant"]),
+        parse_mode="Markdown",
+    )
+    bof["msg_id"] = msg.message_id
+    _reset_timer(ctx, tgame_id)
 
 
 async def cb_team_pick(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
