@@ -1,18 +1,16 @@
 """
 Specific requirements handled:
-  1. Timeout system configuration broken into two separate selection phases:
-     - Phase 1: Choose Time Duration (30s increments up to 300s, or Turn Off).
-     - Phase 2: Choose Penalty Runs (1 to 6 runs).
-  2. Runs deducted automatically if players or captains stall.
-  3. Warning notification broadcasted 30 seconds before expiry.
-  4. /declare command for batting captains/hosts to close out an innings.
+  1. Group admins completely stripped of standard overrides. They are treated as ordinary group members unless they are the Host or Captain.
+  2. Host can manage setup settings, configure lineups (/batting & /bowling), but cannot vote in captain elections.
+  3. Captains handle tosses, numeric ball selections, and can declare innings.
+  4. Captain election executes entirely through a single-message team dashboard.
 """
 import logging
 import random
 import asyncio
 from typing import Optional
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatMember
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -80,17 +78,6 @@ def record_result(user_id: int, name: str, won: bool, draw: bool = False) -> Non
         p["wins"] += 1
     else:
         p["losses"] += 1
-
-
-# ─────────────────────────────────────────────────────────────
-#  HELPERS
-# ─────────────────────────────────────────────────────────────
-async def is_admin(bot, chat_id: int, user_id: int) -> bool:
-    try:
-        member = await bot.get_chat_member(chat_id, user_id)
-        return member.status in (ChatMember.ADMINISTRATOR, ChatMember.OWNER)
-    except Exception:
-        return False
 
 
 # ─────────────────────────────────────────────────────────────
@@ -198,8 +185,8 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         "/endgame — End active team game _(host only)_\n"
         "/add @user A|B — Add player to a team _(host only)_\n"
         "/remove @user — Remove player from team _(host only)_\n"
-        "/batting @user|me — Assign batter _(batting captain / host / self)_\n"
-        "/bowling @user|me — Assign bowler _(bowling captain / host / self)_\n",
+        "/batting @user|me — Assign batter _(captain / host / self)_\n"
+        "/bowling @user|me — Assign bowler _(captain / host / self)_\n",
         parse_mode="Markdown",
     )
 
@@ -626,15 +613,6 @@ def _bowl_key(tgame: dict) -> str:
     return "b" if tgame["batting_team"] == "a" else "a"
 
 
-def _is_authority(tgame: dict, user_id: int, admin: bool = False) -> bool:
-    if user_id == tgame["host_id"]:
-        return True
-    for t in ["a", "b"]:
-        if user_id == tgame[f"team_{t}"]["captain_id"]:
-            return True
-    return admin
-
-
 def _setup_text(tgame: dict) -> str:
     def mlist(t):
         m = tgame[f"team_{t}"]["members"]
@@ -666,7 +644,6 @@ def _setup_kb(tgame_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("➕ Join Team A", callback_data=f"tj:{tgame_id}:a"),
          InlineKeyboardButton("➕ Join Team B", callback_data=f"tj:{tgame_id}:b")],
-        [InlineKeyboardButton("👑 Set Captains",      callback_data=f"tsetcap:{tgame_id}")],
         [InlineKeyboardButton("🎯 Set Overs",         callback_data=f"tsetovers:{tgame_id}")],
         [InlineKeyboardButton("🔢 Toggle Variant",    callback_data=f"tvariant:{tgame_id}")],
         [InlineKeyboardButton("⏳ Config Timeout",    callback_data=f"tmenu_to_sec:{tgame_id}")],
@@ -760,7 +737,7 @@ async def cmd_declare(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         
     bk = tgame["batting_team"]
     if user.id != tgame[f"team_{bk}"]["captain_id"] and user.id != tgame["host_id"]:
-        await update.message.reply_text("Only the batting team's captain or the host can declare the innings.")
+        await update.message.reply_text("🛑 Only your Captain or Host can declare the innings profile.")
         return
 
     _cancel_timer(tgame_id)
@@ -785,7 +762,7 @@ async def cmd_endgame(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
     tgame = team_games.get(tgame_id)
     if tgame and user.id != tgame["host_id"]:
-        await update.message.reply_text("Only the host can end the game.")
+        await update.message.reply_text("🛑 Only the host can terminate active matches.")
         return
     if tgame:
         _cancel_timer(tgame_id)
@@ -812,7 +789,7 @@ async def cmd_add(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not tgame:
         return
     if user.id != tgame["host_id"]:
-        await update.message.reply_text("Only the host can add players.")
+        await update.message.reply_text("🛑 Only the host can add players.")
         return
     target_id, target_name = _resolve_mention(update.message)
     if not target_id:
@@ -855,7 +832,7 @@ async def cmd_remove(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not tgame:
         return
     if user.id != tgame["host_id"]:
-        await update.message.reply_text("Only the host can remove players.")
+        await update.message.reply_text("🛑 Only the host can remove players.")
         return
     target_id, _ = _resolve_mention(update.message)
     if not target_id:
@@ -880,7 +857,7 @@ async def cmd_remove(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 # ─────────────────────────────────────────────────────────────
-#  Join team button
+#  Join Team / Automated Teammate Captain Voting Logic
 # ─────────────────────────────────────────────────────────────
 async def cb_team_join(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
@@ -902,113 +879,88 @@ async def cb_team_join(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
     for t in ["a", "b"]:
         if user.id in tgame[f"team_{t}"]["members"]:
-            if t == team:
-                await query.answer(f"You're already in {_tname(tgame, team)}!")
-            else:
-                await query.answer(
-                    "You can't switch teams yourself. Ask the host to move you with /add and /remove.",
-                    show_alert=True,
-                )
+            await query.answer("You are already in a team! No manual switching.", show_alert=True)
             return
+            
     tgame[f"team_{team}"]["members"][user.id] = user.first_name
     await query.answer(f"Joined {_tname(tgame, team)}!")
     await _refresh_setup(ctx, tgame)
+    
+    # Render interactive team voting profile
+    await _send_team_vote_msg(ctx, tgame, team)
 
 
-# ─────────────────────────────────────────────────────────────
-#  Set captains
-# ─────────────────────────────────────────────────────────────
-async def cb_set_captains(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    user  = update.effective_user
-    _cache_user(user)
-    parts = query.data.split(":")
-    try:
-        tgame_id = int(parts[1])
-    except (IndexError, ValueError):
-        await query.answer()
+async def _send_team_vote_msg(ctx, tgame, team):
+    tdata = tgame[f"team_{team}"]
+    if tdata["captain_id"]:
         return
-    tgame = team_games.get(tgame_id)
-    if not tgame:
-        await query.answer("Game not found.")
-        return
-    admin = await is_admin(ctx.bot, tgame["chat_id"], user.id)
-    if not _is_authority(tgame, user.id, admin):
-        await query.answer("Only host/captains/admins.", show_alert=True)
-        return
-    await query.answer()
+        
     buttons = []
-    for t in ["a", "b"]:
-        for uid, uname in tgame[f"team_{t}"]["members"].items():
-            mark = " 👑" if uid == tgame[f"team_{t}"]["captain_id"] else ""
-            buttons.append([InlineKeyboardButton(
-                f"{uname}{mark} ({_tname(tgame, t)})",
-                callback_data=f"tcap:{tgame_id}:{t}:{uid}"
-            )])
+    for uid, uname in tdata["members"].items():
+        buttons.append([InlineKeyboardButton(f"🗳️ Vote {uname}", callback_data=f"tvote:{tgame['game_msg_id']}:{team}:{uid}")])
+        
     if not buttons:
-        await ctx.bot.send_message(tgame["chat_id"], "No players in teams yet!")
         return
-    buttons.append([InlineKeyboardButton("❌ Cancel", callback_data=f"tcapcancel:{tgame_id}")])
+        
     await ctx.bot.send_message(
-        tgame["chat_id"], "👑 *Select captain:*",
-        reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown",
+        chat_id=tgame["chat_id"],
+        text=f"👑 *{_tname(tgame, team)} Captain Election*\n⚠️ *Note:* Host and opponents locked out. Teammates click below to elect your leader!",
+        reply_markup=InlineKeyboardMarkup(buttons),
+        parse_mode="Markdown"
     )
 
 
-async def cb_assign_captain(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+async def cb_team_vote(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    user  = update.effective_user
-    _cache_user(user)
+    user = update.effective_user
     parts = query.data.split(":")
-    try:
-        tgame_id   = int(parts[1])
-        team       = parts[2]
-        target_uid = int(parts[3])
-    except (IndexError, ValueError):
-        await query.answer()
-        return
+    tgame_id, team, target_uid = int(parts[1]), parts[2], int(parts[3])
+    
     tgame = team_games.get(tgame_id)
     if not tgame:
         await query.answer()
         return
-    admin = await is_admin(ctx.bot, tgame["chat_id"], user.id)
-    if not _is_authority(tgame, user.id, admin):
-        await query.answer("Only host/captains/admins.", show_alert=True)
+        
+    tdata = tgame[f"team_{team}"]
+    if tdata["captain_id"]:
+        await query.answer("Captain already assigned!")
+        await query.edit_message_reply_markup(reply_markup=None)
         return
-    name = tgame[f"team_{team}"]["members"].get(target_uid, "?")
-    tgame[f"team_{team}"]["captain_id"]   = target_uid
-    tgame[f"team_{team}"]["captain_name"] = name
-    await query.answer(f"{name} is now captain of {_tname(tgame, team)}!")
-    await query.edit_message_reply_markup(reply_markup=None)
+        
+    # Enforce teammate verification
+    if user.id not in tdata["members"]:
+        await query.answer("🛑 Access Denied! Only teammates on this side can vote.", show_alert=True)
+        return
+        
+    target_uid = int(target_uid)
+    name = tdata["members"].get(target_uid, "?")
+    tdata["captain_id"] = target_uid
+    tdata["captain_name"] = name
+    
+    await query.answer(f"{name} elected Captain!")
+    await query.edit_message_text(
+        text=f"👑 *{_tname(tgame, team)} Election Complete!*\n\nTeammate *{user.first_name}* voted.\n🏆 *{name}* is now officially your Captain!",
+        reply_markup=None,
+        parse_mode="Markdown"
+    )
     await _refresh_setup(ctx, tgame)
 
 
-async def cb_cap_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    await query.answer()
-    await query.edit_message_reply_markup(reply_markup=None)
-
-
 # ─────────────────────────────────────────────────────────────
-#  Set overs
+#  Set Overs (Host Only)
 # ─────────────────────────────────────────────────────────────
 async def cb_set_overs(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     user  = update.effective_user
     _cache_user(user)
     parts = query.data.split(":")
-    try:
-        tgame_id = int(parts[1])
-    except (IndexError, ValueError):
-        await query.answer()
-        return
+    tgame_id = int(parts[1])
     tgame = team_games.get(tgame_id)
     if not tgame:
         await query.answer()
         return
-    admin = await is_admin(ctx.bot, tgame["chat_id"], user.id)
-    if user.id != tgame["host_id"] and not admin:
-        await query.answer("Only the host or group admins can set overs.", show_alert=True)
+    if user.id != tgame["host_id"]:
+        await query.answer("🛑 Configuration locked. Only the host can edit overs.", show_alert=True)
         return
     await query.answer()
     rows, row = [], []
@@ -1030,19 +982,11 @@ async def cb_overs_pick(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     user  = update.effective_user
     _cache_user(user)
     parts = query.data.split(":")
-    try:
-        tgame_id = int(parts[1])
-        overs    = int(parts[2])
-    except (IndexError, ValueError):
-        await query.answer()
-        return
+    tgame_id = int(parts[1])
+    overs    = int(parts[2])
     tgame = team_games.get(tgame_id)
-    if not tgame:
-        await query.answer()
-        return
-    admin = await is_admin(ctx.bot, tgame["chat_id"], user.id)
-    if user.id != tgame["host_id"] and not admin:
-        await query.answer("Only the host or group admins can set overs.", show_alert=True)
+    if not tgame or user.id != tgame["host_id"]:
+        await query.answer("Unauthorized parameter command mapping.", show_alert=True)
         return
     tgame["overs"] = overs
     await query.answer(f"Overs set to {overs}!")
@@ -1051,7 +995,7 @@ async def cb_overs_pick(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 # ─────────────────────────────────────────────────────────────
-#  Configure Timeout System (NEW STEP 1: TIME CONFIG SELECTION)
+#  Configure Timeout System (Host Only)
 # ─────────────────────────────────────────────────────────────
 async def cb_menu_timeout_secs(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
@@ -1060,13 +1004,11 @@ async def cb_menu_timeout_secs(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -
     tgame_id = int(query.data.split(":")[1])
     tgame = team_games.get(tgame_id)
     if not tgame or user.id != tgame["host_id"]:
-        await query.answer("Only the host can modify structural configs.", show_alert=True)
+        await query.answer("🛑 Configuration locked. Only the host can configure timeouts.", show_alert=True)
         return
     await query.answer()
     
-    # Grid generation supporting 30s increments up to 300s
-    rows = []
-    row = []
+    rows, row = [], []
     for sec in range(30, 301, 30):
         row.append(InlineKeyboardButton(f"{sec}s", callback_data=f"tselect_sec:{tgame_id}:{sec}"))
         if len(row) == 4:
@@ -1074,26 +1016,18 @@ async def cb_menu_timeout_secs(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -
             row = []
     if row:
         rows.append(row)
-        
     rows.append([InlineKeyboardButton("❌ Turn Timeout OFF", callback_data=f"tselect_sec:{tgame_id}:0")])
     
     await ctx.bot.send_message(
-        tgame["chat_id"], 
-        "⏳ *Step 1: Choose Timeout Duration*", 
-        reply_markup=InlineKeyboardMarkup(rows), 
-        parse_mode="Markdown"
+        tgame["chat_id"], "⏳ *Step 1: Choose Timeout Duration*", reply_markup=InlineKeyboardMarkup(rows), parse_mode="Markdown"
     )
 
 
-# ─────────────────────────────────────────────────────────────
-#  Configure Timeout System (NEW STEP 2: PENALTY RUN SELECTION)
-# ─────────────────────────────────────────────────────────────
 async def cb_select_timeout_secs(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     parts = query.data.split(":")
     tgame_id = int(parts[1])
     secs = int(parts[2])
-    
     tgame = team_games.get(tgame_id)
     if not tgame:
         await query.answer()
@@ -1107,17 +1041,13 @@ async def cb_select_timeout_secs(update: Update, ctx: ContextTypes.DEFAULT_TYPE)
         await _refresh_setup(ctx, tgame)
         return
 
-    # Temporarily store selected seconds on the matrix object structure
     tgame["_temp_secs"] = secs
-    
-    # Generate Run Selector (1 to 6)
     row = [InlineKeyboardButton(f"{r} Run{'s' if r > 1 else ''}", callback_data=f"tfinish_to:{tgame_id}:{r}") for r in range(1, 7)]
     kb = InlineKeyboardMarkup([row[0:3], row[3:6]])
     
     await query.edit_message_text(
         text=f"⏳ *Step 2: Choose Run Penalty*\nDuration selected: *{secs}s*\n\nSelect runs to deduct on timeout:",
-        reply_markup=kb,
-        parse_mode="Markdown"
+        reply_markup=kb, parse_mode="Markdown"
     )
 
 
@@ -1126,7 +1056,6 @@ async def cb_finish_timeout_config(update: Update, ctx: ContextTypes.DEFAULT_TYP
     parts = query.data.split(":")
     tgame_id = int(parts[1])
     runs = int(parts[2])
-    
     tgame = team_games.get(tgame_id)
     if tgame and "_temp_secs" in tgame:
         tgame["timeout_secs"] = tgame["_temp_secs"]
@@ -1139,25 +1068,20 @@ async def cb_finish_timeout_config(update: Update, ctx: ContextTypes.DEFAULT_TYP
 
 
 # ─────────────────────────────────────────────────────────────
-#  Toggle variant
+#  Toggle Variant (Host Only)
 # ─────────────────────────────────────────────────────────────
 async def cb_toggle_variant(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     user  = update.effective_user
     _cache_user(user)
     parts = query.data.split(":")
-    try:
-        tgame_id = int(parts[1])
-    except (IndexError, ValueError):
-        await query.answer()
-        return
+    tgame_id = int(parts[1])
     tgame = team_games.get(tgame_id)
     if not tgame:
         await query.answer()
         return
-    admin = await is_admin(ctx.bot, tgame["chat_id"], user.id)
-    if not _is_authority(tgame, user.id, admin):
-        await query.answer("Only host/admins.", show_alert=True)
+    if user.id != tgame["host_id"]:
+        await query.answer("🛑 Configuration locked. Only the host can toggle variants.", show_alert=True)
         return
     tgame["variant"] = "no5" if tgame["variant"] == "with5" else "with5"
     label = "With 5 (1–6)" if tgame["variant"] == "with5" else "Without 5 (0,1,2,3,4,6)"
@@ -1166,32 +1090,27 @@ async def cb_toggle_variant(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> N
 
 
 # ═════════════════════════════════════════════════════════════
-#  TEAM TOSS
+#  TEAM TOSS (Host Starts)
 # ═════════════════════════════════════════════════════════════
 async def cb_team_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     user  = update.effective_user
     _cache_user(user)
     parts = query.data.split(":")
-    try:
-        tgame_id = int(parts[1])
-    except (IndexError, ValueError):
-        await query.answer()
-        return
+    tgame_id = int(parts[1])
     tgame = team_games.get(tgame_id)
     if not tgame:
         await query.answer()
         return
-    admin = await is_admin(ctx.bot, tgame["chat_id"], user.id)
-    if user.id != tgame["host_id"] and not admin:
-        await query.answer("Only the host or group admins can start.", show_alert=True)
+    if user.id != tgame["host_id"]:
+        await query.answer("🛑 Only the game host can start the match match structure.", show_alert=True)
         return
     ta, tb = tgame["team_a"], tgame["team_b"]
     if not ta["members"] or not tb["members"]:
         await query.answer("Both teams need at least 1 player!", show_alert=True)
         return
     if not ta["captain_id"] or not tb["captain_id"]:
-        await query.answer("Both teams need a captain!", show_alert=True)
+        await query.answer("Both teams need a captain assigned first!", show_alert=True)
         return
     await query.answer()
 
@@ -1228,12 +1147,8 @@ async def cb_team_toss_call(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> N
     user  = update.effective_user
     _cache_user(user)
     parts = query.data.split(":")
-    try:
-        tgame_id = int(parts[1])
-        call     = parts[2]
-    except (IndexError, ValueError):
-        await query.answer()
-        return
+    tgame_id = int(parts[1])
+    call     = parts[2]
     tgame = team_games.get(tgame_id)
     if not tgame or tgame["phase"] != "toss":
         await query.answer()
@@ -1241,7 +1156,7 @@ async def cb_team_toss_call(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> N
     caller_team   = tgame["toss_caller_team"]
     caller_cap_id = tgame[f"team_{caller_team}"]["captain_id"]
     if user.id != caller_cap_id:
-        await query.answer("Only the calling captain can call!", show_alert=True)
+        await query.answer("Only the calling captain can make the call!", show_alert=True)
         return
     if tgame["toss_call"] is not None:
         await query.answer("Already called!")
@@ -1273,11 +1188,7 @@ async def cb_team_toss_flip(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> N
     user  = update.effective_user
     _cache_user(user)
     parts = query.data.split(":")
-    try:
-        tgame_id = int(parts[1])
-    except (IndexError, ValueError):
-        await query.answer()
-        return
+    tgame_id = int(parts[1])
     tgame = team_games.get(tgame_id)
     if not tgame or tgame["phase"] != "toss":
         await query.answer()
@@ -1285,7 +1196,7 @@ async def cb_team_toss_flip(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> N
     flipper_team   = tgame["toss_flipper_team"]
     flipper_cap_id = tgame[f"team_{flipper_team}"]["captain_id"]
     if user.id != flipper_cap_id:
-        await query.answer("Only the flipping captain can flip!", show_alert=True)
+        await query.answer("Only the flipping captain can execute the action!", show_alert=True)
         return
     await query.answer("Flipping… 🪙")
 
@@ -1322,12 +1233,8 @@ async def cb_team_toss(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     user  = update.effective_user
     _cache_user(user)
     parts = query.data.split(":")
-    try:
-        tgame_id = int(parts[1])
-        choice   = parts[2]
-    except (IndexError, ValueError):
-        await query.answer()
-        return
+    tgame_id = int(parts[1])
+    choice   = parts[2]
     tgame = team_games.get(tgame_id)
     if not tgame or tgame["phase"] != "toss":
         await query.answer()
@@ -1335,7 +1242,7 @@ async def cb_team_toss(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     tw     = tgame["toss_winner"]
     cap_id = tgame[f"team_{tw}"]["captain_id"]
     if user.id != cap_id:
-        await query.answer("Only the toss-winning captain can choose!", show_alert=True)
+        await query.answer("Only the toss-winning captain can settle choices!", show_alert=True)
         return
     await query.answer()
 
@@ -1353,8 +1260,8 @@ async def cb_team_toss(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             f"🏏 *{_tname(tgame, bk)}* bat first\n"
             f"🎳 *{_tname(tgame, wk)}* bowl\n\n"
             f"Overs: *{tgame['overs']}*\n\n"
-            f"👑 *{tgame[f'team_{bk}']['captain_name']}* — `/batting @username` or `/batting me` to send your opener\n"
-            f"👑 *{tgame[f'team_{wk}']['captain_name']}* — `/bowling @username` or `/bowling me` to send your opener"
+            f"👑 *{tgame[f'team_{bk}']['captain_name']}* — `/batting @username` or `/batting me` to send opener\n"
+            f"👑 *{tgame[f'team_{wk}']['captain_name']}* — `/bowling @username` or `/bowling me` to send opener"
         ),
         reply_markup=None,
         parse_mode="Markdown",
@@ -1363,7 +1270,7 @@ async def cb_team_toss(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 # ═════════════════════════════════════════════════════════════
-#  /batting AND /bowling COMMANDS
+#  /batting AND /bowling COMMANDS (CO-MANAGED BY HOST & CAPTAIN)
 # ═════════════════════════════════════════════════════════════
 def _ensure_bof(tgame: dict) -> dict:
     if tgame.get("balls_on_field") is None:
@@ -1394,8 +1301,9 @@ async def cmd_batting(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if ctx.args and ctx.args[0].lower() == "me":
         target_id, target_name = user.id, user.first_name
     else:
+        # Authorization matrix verification checkpoint
         if user.id != tgame[f"team_{bk}"]["captain_id"] and user.id != tgame["host_id"]:
-            await update.message.reply_text("Only the batting captain or host can assign another batter.")
+            await update.message.reply_text("🛑 Lineups can only be mapped by your Team Captain or the Game Host.")
             return
         target_id, target_name = _resolve_mention(update.message)
 
@@ -1432,7 +1340,7 @@ async def cmd_bowling(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         target_id, target_name = user.id, user.first_name
     else:
         if user.id != tgame[f"team_{wk}"]["captain_id"] and user.id != tgame["host_id"]:
-            await update.message.reply_text("Only the bowling captain or host can assign another bowler.")
+            await update.message.reply_text("🛑 Lineups can only be mapped by your Team Captain or the Game Host.")
             return
         target_id, target_name = _resolve_mention(update.message)
 
@@ -1764,8 +1672,8 @@ async def _end_innings1(ctx, tgame_id: int) -> None:
         f"🔄 *Innings 2 begins!*\n\n"
         f"🏏 *{_tname(tgame, new_bk)}* bat\n"
         f"🎳 *{_tname(tgame, new_wk)}* bowl\n\n"
-        f"👑 *{tgame[f'new_bk']['captain_name'] if 'new_bk' in tgame else tgame[f'team_{new_bk}']['captain_name']}* — `/batting @username` or `/batting me` for opener\n"
-        f"👑 *{tgame[f'new_wk']['captain_name'] if 'new_wk' in tgame else tgame[f'team_{new_wk}']['captain_name']}* — `/bowling @username` or `/bowling me` for opener",
+        f"👑 *{tgame[f'team_{new_bk}']['captain_name']}* — `/batting @username` or `/batting me` for opener\n"
+        f"👑 *{tgame[f'team_{new_wk}']['captain_name']}* — `/bowling @username` or `/bowling me` for opener",
         parse_mode="Markdown",
     )
     _reset_timer(ctx, tgame_id)
@@ -1829,7 +1737,7 @@ async def _end_match(ctx, tgame_id: int) -> None:
 
 
 # ─────────────────────────────────────────────────────────────
-#  MAIN APPLICATION BUILDER HANDLER
+#  MAIN ENTRY
 # ─────────────────────────────────────────────────────────────
 def main() -> None:
     app = Application.builder().token(TELEGRAM_TOKEN).build()
@@ -1855,13 +1763,10 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(cb_duel_pick,        pattern=r"^dp:"))
     
     app.add_handler(CallbackQueryHandler(cb_team_join,        pattern=r"^tj:"))
-    app.add_handler(CallbackQueryHandler(cb_set_captains,     pattern=r"^tsetcap:"))
-    app.add_handler(CallbackQueryHandler(cb_assign_captain,   pattern=r"^tcap:"))
-    app.add_handler(CallbackQueryHandler(cb_cap_cancel,       pattern=r"^tcapcancel:"))
+    app.add_handler(CallbackQueryHandler(cb_team_vote,        pattern=r"^tvote:"))
     app.add_handler(CallbackQueryHandler(cb_set_overs,        pattern=r"^tsetovers:"))
     app.add_handler(CallbackQueryHandler(cb_overs_pick,       pattern=r"^tov:"))
     
-    # Timeout structural patterns
     app.add_handler(CallbackQueryHandler(cb_menu_timeout_secs,  pattern=r"^tmenu_to_sec:"))
     app.add_handler(CallbackQueryHandler(cb_select_timeout_secs, pattern=r"^tselect_sec:"))
     app.add_handler(CallbackQueryHandler(cb_finish_timeout_config, pattern=r"^tfinish_to:"))
@@ -1874,7 +1779,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(cb_team_toss,        pattern=r"^ttoss:"))
     app.add_handler(CallbackQueryHandler(cb_team_pick,        pattern=r"^tp:"))
 
-    logger.info("CricBot running with two-step sequential configuration logic…")
+    logger.info("CricBot is active with finalized role permissions…")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
