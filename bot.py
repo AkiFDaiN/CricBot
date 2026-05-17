@@ -1,10 +1,9 @@
 """
 Specific requirements handled:
-  1. Fixed the syntax error on line 764 (removed rogue 'choke' word).
-  2. Multi-user voting system replaced with a direct "Self-Claim" captaincy button.
-  3. Only verified teammates who have joined the team can claim its captaincy.
-  4. Host and opposing team are restricted from claiming roles.
-  5. All host management and captain game permissions are fully preserved.
+  1. Menu protection limits mode configuration access to the /gamecricket commander.
+  2. Captain claims collapse automatically via inline message editing.
+  3. Performance weights track and calculate match MVP at final whistle.
+  4. Bowler names explicitly mapped into over summaries.
 """
 import logging
 import random
@@ -226,10 +225,12 @@ async def cmd_profile(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_gamecricket(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    _cache_user(update.effective_user)
+    user = update.effective_user
+    _cache_user(user)
+    # Inject Commander ID to restrict initialization configurations
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("⚔️ 1v1",        callback_data="mode:1v1")],
-        [InlineKeyboardButton("🏟️ Team Mode", callback_data="mode:team")],
+        [InlineKeyboardButton("⚔️ 1v1",        callback_data=f"mode:1v1:{user.id}")],
+        [InlineKeyboardButton("🏟️ Team Mode", callback_data=f"mode:team:{user.id}")],
     ])
     await update.message.reply_text(
         "🏏 *Choose Game Mode:*",
@@ -240,13 +241,22 @@ async def cmd_gamecricket(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
 
 async def cb_mode_select(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    _cache_user(update.effective_user)
+    user = update.effective_user
+    _cache_user(user)
     await query.answer()
-    choice = query.data.split(":")[1]
+    
+    parts = query.data.split(":")
+    choice = parts[1]
+    creator_id = int(parts[2])
+    
+    if user.id != creator_id:
+        await query.answer("🛑 You aren't the commander who initiated this game call setup!", show_alert=True)
+        return
+
     if choice == "1v1":
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔢 With 5  (1–6)",             callback_data="1v1v:with5")],
-            [InlineKeyboardButton("0️⃣ Without 5  (0,1,2,3,4,6)", callback_data="1v1v:no5")],
+            [InlineKeyboardButton("🔢 With 5  (1–6)",             callback_data=f"1v1v:with5:{creator_id}")],
+            [InlineKeyboardButton("0️⃣ Without 5  (0,1,2,3,4,6)", callback_data=f"1v1v:no5:{creator_id}")],
         ])
         await query.edit_message_text(
             "⚔️ *1v1 — Choose variant:*", reply_markup=kb, parse_mode="Markdown"
@@ -333,11 +343,19 @@ def _duel_scorecard(g: dict, result_line: str, winner_name: str = None) -> str:
 
 
 async def cb_1v1_variant(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
+    query      = update.callback_query
     challenger = update.effective_user
     _cache_user(challenger)
     await query.answer()
-    variant = query.data.split(":")[1]
+    
+    parts = query.data.split(":")
+    variant = parts[1]
+    creator_id = int(parts[2])
+    
+    if challenger.id != creator_id:
+        await query.answer("🛑 Setup configuration access locked to match commander!", show_alert=True)
+        return
+        
     get_profile(challenger.id, challenger.first_name)
     g = {
         "variant": variant,
@@ -686,8 +704,8 @@ async def _team_setup_start(query, ctx) -> None:
         "variant":   "with5",
         "timeout_secs": 60,   
         "penalty_runs": 5,    
-        "team_a": {"name": "Team A", "captain_id": None, "captain_name": None, "members": {}},
-        "team_b": {"name": "Team B", "captain_id": None, "captain_name": None, "members": {}},
+        "team_a": {"name": "Team A", "captain_id": None, "captain_name": None, "members": {}, "claim_msg_id": None},
+        "team_b": {"name": "Team B", "captain_id": None, "captain_name": None, "members": {}, "claim_msg_id": None},
         "toss_caller_team":  None,
         "toss_flipper_team": None,
         "toss_call":         None,
@@ -698,8 +716,8 @@ async def _team_setup_start(query, ctx) -> None:
         "current_innings":       1,
         "target":                None,
         "innings_data": {
-            1: {"score": 0, "wickets": 0, "balls": 0, "history": [], "batter_runs": {}, "batter_balls": {}},
-            2: {"score": 0, "wickets": 0, "balls": 0, "history": [], "batter_runs": {}, "batter_balls": {}},
+            1: {"score": 0, "wickets": 0, "balls": 0, "history": [], "batter_runs": {}, "batter_balls": {}, "bowler_wickets": {}},
+            2: {"score": 0, "wickets": 0, "balls": 0, "history": [], "batter_runs": {}, "batter_balls": {}, "bowler_wickets": {}},
         },
         "balls_on_field": None,
         "prev_bowlers":   set(),
@@ -858,7 +876,7 @@ async def cmd_remove(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 # ─────────────────────────────────────────────────────────────
-#  Join Team / Automated Captain Self-Claim Dashboard Message
+#  Join Team / Captain Dashboard Message Strategy Collapse
 # ─────────────────────────────────────────────────────────────
 async def cb_team_join(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
@@ -887,24 +905,27 @@ async def cb_team_join(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await query.answer(f"Joined {_tname(tgame, team)}!")
     await _refresh_setup(ctx, tgame)
     
+    # Send a single claim message per team (instead of spawning updates continuously)
     await _send_team_claim_msg(ctx, tgame, team)
 
 
 async def _send_team_claim_msg(ctx, tgame, team):
     tdata = tgame[f"team_{team}"]
-    if tdata["captain_id"]:
+    # Block processing if captain exists or a claim block is already live
+    if tdata["captain_id"] or tdata.get("claim_msg_id") is not None:
         return
         
     kb = InlineKeyboardMarkup([[
         InlineKeyboardButton(f"👑 I am the Captain of {_tname(tgame, team)}", callback_data=f"tclaim_cap:{tgame['game_msg_id']}:{team}")
     ]])
     
-    await ctx.bot.send_message(
+    msg = await ctx.bot.send_message(
         chat_id=tgame["chat_id"],
-        text=f"🏟️ *{_tname(tgame, team)} Captaincy Declaration*\nVerification rule: If you joined this side, click below to take charge!",
+        text=f"🏟️ *{_tname(tgame, team)} Captaincy Declaration*\nIf you joined this side, click below to take charge!",
         reply_markup=kb,
         parse_mode="Markdown"
     )
+    tdata["claim_msg_id"] = msg.message_id
 
 
 async def cb_team_claim_cap(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -921,7 +942,10 @@ async def cb_team_claim_cap(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> N
     tdata = tgame[f"team_{team}"]
     if tdata["captain_id"]:
         await query.answer("Captain already assigned!")
-        await query.edit_message_reply_markup(reply_markup=None)
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
         return
         
     if user.id not in tdata["members"]:
@@ -932,8 +956,9 @@ async def cb_team_claim_cap(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> N
     tdata["captain_name"] = user.first_name
     
     await query.answer("Captain status successfully updated!")
+    # Collapses the message block inline smoothly as specified
     await query.edit_message_text(
-        text=f"👑 *{_tname(tgame, team)} Captain Settled!*\n🏆 *{user.first_name}* clicked the button and claimed full strategic leadership!",
+        text=f"✅ *{user.first_name}* is the captain of *{_tname(tgame, team)}*!",
         reply_markup=None,
         parse_mode="Markdown"
     )
@@ -1097,7 +1122,7 @@ async def cb_team_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await query.answer()
         return
     if user.id != tgame["host_id"]:
-        await query.answer("🛑 Only the game host can start the match match structure.", show_alert=True)
+        await query.answer("🛑 Only the game host can start the match structure.", show_alert=True)
         return
     ta, tb = tgame["team_a"], tgame["team_b"]
     if not ta["members"] or not tb["members"]:
@@ -1521,6 +1546,7 @@ async def _team_resolve(ctx, tgame_id: int) -> None:
 
     if bat_n == bowl_n:
         d["wickets"] += 1
+        d["bowler_wickets"][bowler_id] = d["bowler_wickets"].get(bowler_id, 0) + 1
         bof["over_history"].append("W")
         d["history"].append("W")
         wkt_text = (
@@ -1564,9 +1590,11 @@ async def _team_resolve(ctx, tgame_id: int) -> None:
             ov_balls = bof["over_history"][-6:]
             runs_ov  = sum(int(b) for b in ov_balls if b.isdigit())
             extra    = f"  |  Need: *{tgame['target'] - d['score']}*" if tgame.get("target") else ""
+            # Includes Bowler Name as requested
             await ctx.bot.send_message(
                 chat_id,
                 f"📋 *End of Over {ov_num}*\n"
+                f"🎳 Bowler: *{bowler_name}*\n"
                 f"Balls: {' | '.join(ov_balls)}\nRuns: *{runs_ov}*\n\n"
                 f"📊 *{_tname(tgame, tgame['batting_team'])}*: *{d['score']}/{d['wickets']}*{extra}",
                 parse_mode="Markdown",
@@ -1701,6 +1729,30 @@ async def _end_match(ctx, tgame_id: int) -> None:
         for uid, uname in tgame[f"team_{t}"]["members"].items():
             record_result(uid, uname, won=won, draw=draw)
 
+    # ── MVP ENGINE COMPUTATION MATRIX ─────────────────────────
+    player_perf = {}
+    def process_mvp(d, team_key):
+        for uid, uname in tgame[f"team_{team_key}"]["members"].items():
+            if uid not in player_perf:
+                player_perf[uid] = {"name": uname, "runs": 0, "wickets": 0}
+            player_perf[uid]["runs"] += d["batter_runs"].get(uid, 0)
+            player_perf[uid]["wickets"] += d["bowler_wickets"].get(uid, 0)
+
+    process_mvp(d1, "a")
+    process_mvp(d1, "b")
+    process_mvp(d2, "a")
+    process_mvp(d2, "b")
+
+    mvp_name, max_weight = None, -1
+    for uid, stats in player_perf.items():
+        weight = stats["runs"] + (stats["wickets"] * 20)
+        if weight > max_weight and (stats["runs"] > 0 or stats["wickets"] > 0):
+            max_weight = weight
+            mvp_name = f"🏅 *MVP:* *{stats['name']}* ({stats['runs']} runs | {stats['wickets']} wickets)"
+
+    mvp_line = mvp_name if mvp_name else "🏅 *MVP:* None (No performance records)"
+    # ──────────────────────────────────────────────────────────
+
     def bat_summary(d, bat_key):
         lines = []
         for uid, uname in tgame[f"team_{bat_key}"]["members"].items():
@@ -1721,6 +1773,7 @@ async def _end_match(ctx, tgame_id: int) -> None:
         f"*Innings 2 — {_tname(tgame, bat2)}*\n{bat_summary(d2, bat2)}\n"
         f"Total: *{s2}/{d2['wickets']}*\n\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n{result_line}\n{outcome}\n\n"
+        f"{mvp_line}\n\n"
         f"Play again with /gamecricket 🏏"
     )
     await ctx.bot.send_message(chat_id, scorecard, parse_mode="Markdown")
