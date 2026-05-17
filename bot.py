@@ -1,9 +1,10 @@
 """
 Specific requirements handled:
-  1. Multi-user voting system replaced with a direct "Self-Claim" captaincy button.
-  2. Only verified teammates who have joined the team can claim its captaincy.
-  3. Host and opposing team are restricted from claiming roles.
-  4. All host management and captain game permissions are fully preserved.
+  1. Fixed the syntax error on line 764 (removed rogue 'choke' word).
+  2. Multi-user voting system replaced with a direct "Self-Claim" captaincy button.
+  3. Only verified teammates who have joined the team can claim its captaincy.
+  4. Host and opposing team are restricted from claiming roles.
+  5. All host management and captain game permissions are fully preserved.
 """
 import logging
 import random
@@ -761,7 +762,7 @@ async def cmd_endgame(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("No active team game in this chat.")
         return
     tgame = team_games.get(tgame_id)
-    if tgame choke and user.id != tgame["host_id"]:
+    if tgame and user.id != tgame["host_id"]:
         await update.message.reply_text("🛑 Only the host can terminate active matches.")
         return
     if tgame:
@@ -886,7 +887,6 @@ async def cb_team_join(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await query.answer(f"Joined {_tname(tgame, team)}!")
     await _refresh_setup(ctx, tgame)
     
-    # Fire up the single-message direct claim interface
     await _send_team_claim_msg(ctx, tgame, team)
 
 
@@ -924,7 +924,6 @@ async def cb_team_claim_cap(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> N
         await query.edit_message_reply_markup(reply_markup=None)
         return
         
-    # Enforce verified teammate rule
     if user.id not in tdata["members"]:
         await query.answer(f"🛑 Access Denied! You must join {_tname(tgame, team)} first to declare yourself captain.", show_alert=True)
         return
