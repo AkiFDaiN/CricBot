@@ -1367,6 +1367,9 @@ async def cb_team_toss(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 # ─────────────────────────────────────────────────────────────
 #  /batting AND /bowling COMMANDS (CO-MANAGED BY HOST & CAPTAIN)
 # ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
+#  CORRECTED /batting ME AND /bowling ME COMMAND STRUCTURES
+# ─────────────────────────────────────────────────────────────
 async def cmd_batting(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id  = update.effective_chat.id
     user     = update.effective_user
@@ -1379,7 +1382,8 @@ async def cmd_batting(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
     bk = tgame["batting_team"]
 
-    if ctx.args and ctx.args[0].lower() == "me":
+    # FIX: Safely evaluate if argument is 'me' or fallback to user mention
+    if ctx.args and ctx.args[0].strip().lower() == "me":
         target_id, target_name = user.id, user.first_name
     else:
         if user.id != tgame[f"team_{bk}"]["captain_id"] and user.id != tgame["host_id"]:
@@ -1416,7 +1420,8 @@ async def cmd_bowling(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
     wk = _bowl_key(tgame)
 
-    if ctx.args and ctx.args[0].lower() == "me":
+    # FIX: Safely evaluate if argument is 'me' or fallback to user mention
+    if ctx.args and ctx.args[0].strip().lower() == "me":
         target_id, target_name = user.id, user.first_name
     else:
         if user.id != tgame[f"team_{wk}"]["captain_id"] and user.id != tgame["host_id"]:
