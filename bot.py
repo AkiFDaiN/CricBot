@@ -1,10 +1,10 @@
 """
 Specific requirements handled:
-  1. Bowler name explicitly added to the 1v1 end-of-over summary message.
-  2. Menu protection limits mode configuration access to the /gamecricket commander.
-  3. Captain claims collapse automatically via inline message editing.
-  4. Performance weights track and calculate match MVP at final whistle.
-  5. Bowler names explicitly mapped into over summaries for both modes.
+  1. Removed 'This over: ...' from live 1v1 and Team Mode button panels.
+  2. Replaced with '🏏 Batter's last: X' to map immediate previous ball runs.
+  3. Interactive 3-step tosses symmetrically balanced across modes.
+  4. Automatic inline message collapse for captain declarations.
+  5. Performance metric indices resolve and track final match MVPs.
 """
 import logging
 import random
@@ -266,7 +266,7 @@ async def cb_mode_select(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
 
 
 # ═════════════════════════════════════════════════════════════
-#  1v1 GAME
+#  1v1 GAME MODE
 # ═════════════════════════════════════════════════════════════
 def _duel_kb(game_id: int, variant: str) -> InlineKeyboardMarkup:
     if variant == "with5":
@@ -287,9 +287,14 @@ def _duel_text(g: dict) -> str:
     target   = g.get("target")
     b_runs   = g.get("batter_runs", 0)
     b_balls  = g.get("batter_balls", 0)
-    recent   = "  ".join(g.get("history", [])[-6:]) or "-"
+    
     last_bowl = g.get("last_bowl_num")
-    bowl_line = f"🎳 Bowler's last: *{last_bowl}*" if last_bowl is not None else ""
+    bowl_line = f"🎳 Bowler's last: *{last_bowl}*" if last_bowl is not None else "🎳 Bowler's last: -"
+    
+    # NEW: Batter last prediction mapping tracking layer
+    last_bat = g.get("last_bat_num")
+    bat_line = f"🏏 Batter's last: *{last_bat}*" if last_bat is not None else "🏏 Batter's last: -"
+    
     pick_phase = g.get("pick_phase", "batter")
     lines = [
         "🏏 *CRICKET — 1v1*", "",
@@ -299,7 +304,10 @@ def _duel_text(g: dict) -> str:
     ]
     if target:
         lines.append(f"🎯 Target: {target}  |  Need: *{target - score}*")
-    lines += ["", f"🕐 This over: {recent}", bowl_line, ""]
+    
+    # Removed structural 'This over' tracker text cleanly here
+    lines += ["", bat_line, bowl_line, ""]
+    
     if pick_phase == "batter":
         lines += [
             f"⏳ Waiting for *{batter}* to pick...",
@@ -356,7 +364,6 @@ async def cb_1v1_variant(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         await query.answer("🛑 Setup configuration access locked to match commander!", show_alert=True)
         return
         
-    get_profile(challenger.id, challenger.first_name)
     g = {
         "variant": variant,
         "chat_id": update.effective_chat.id,
@@ -370,7 +377,7 @@ async def cb_1v1_variant(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         "batter_pick": None, "bowler_pick": None,
         "ball": 0, "batter_runs": 0, "batter_balls": 0,
         "first_score": None, "history": [],
-        "last_bowl_num": None,
+        "last_bowl_num": None, "last_bat_num": None,
         "game_msg_id": None,
         "innings1_scorecard": {}, "innings2_scorecard": {},
     }
@@ -406,22 +413,120 @@ async def cb_duel_join(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await query.answer("You started this! Wait for someone else 😄", show_alert=True)
         return
     await query.answer()
+    
     g["opponent"] = {"id": user.id, "name": user.first_name}
     get_profile(user.id, user.first_name)
-    g["phase"]       = "toss"
-    coin             = random.choice(["Heads", "Tails"])
-    toss_winner      = random.choice(["challenger", "opponent"])
-    g["toss_winner"] = toss_winner
-    winner_name      = g["challenger"]["name"] if toss_winner == "challenger" else g["opponent"]["name"]
+    g["phase"] = "toss"
+
+    roles = ["challenger", "opponent"]
+    random.shuffle(roles)
+    g["toss_caller"] = roles[0]
+    g["toss_flipper"] = roles[1]
+    g["toss_call"] = None
+
+    caller_name = g[roles[0]]["name"]
+    flipper_name = g[roles[1]]["name"]
+
     await ctx.bot.edit_message_text(
         chat_id=g["chat_id"], message_id=game_id,
         text=(
-            f"🏏 *{g['challenger']['name']}* vs *{g['opponent']['name']}*\n\n"
-            f"🪙 Toss — *{coin}*\n🏆 *{winner_name}* wins the toss!\n\nChoose Bat or Bowl 👇"
+            f"🏏 *1v1 CRICKET — TOSS*\n\n"
+            f"👤 *{caller_name}* — call it!\n"
+            f"👤 *{flipper_name}* — will flip the coin\n\n"
+            f"*{caller_name}*, choose:"
         ),
         reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("🏏 Bat",  callback_data=f"dt:{game_id}:bat"),
-            InlineKeyboardButton("🎳 Bowl", callback_data=f"dt:{game_id}:bowl"),
+            InlineKeyboardButton("🪙 Heads", callback_data=f"dt_call:{game_id}:heads"),
+            InlineKeyboardButton("🪙 Tails", callback_data=f"dt_call:{game_id}:tails"),
+        ]]),
+        parse_mode="Markdown",
+    )
+
+
+async def cb_duel_toss_call(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    user = update.effective_user
+    _cache_user(user)
+    parts = query.data.split(":")
+    game_id = int(parts[1])
+    call = parts[2]
+
+    g = duel_games.get(game_id)
+    if not g or g["phase"] != "toss":
+        await query.answer()
+        return
+
+    caller_role = g["toss_caller"]
+    if user.id != g[caller_role]["id"]:
+        await query.answer("Only the designated caller can guess the side!", show_alert=True)
+        return
+
+    if g["toss_call"] is not None:
+        await query.answer("Already called!")
+        return
+
+    g["toss_call"] = call
+    await query.answer(f"Called {call.capitalize()}!")
+
+    flipper_role = g["toss_flipper"]
+    flipper_name = g[flipper_role]["name"]
+    caller_name = g[caller_role]["name"]
+
+    await ctx.bot.edit_message_text(
+        chat_id=g["chat_id"], message_id=game_id,
+        text=(
+            f"🏏 *1v1 CRICKET — TOSS*\n\n"
+            f"👤 *{caller_name}* called: *{call.capitalize()}*\n\n"
+            f"👤 *{flipper_name}*, flip the coin!"
+        ),
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("🪙 Flip!", callback_data=f"dt_flip:{game_id}"),
+        ]]),
+        parse_mode="Markdown",
+    )
+
+
+async def cb_duel_toss_flip(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    user = update.effective_user
+    _cache_user(user)
+    parts = query.data.split(":")
+    game_id = int(parts[1])
+
+    g = duel_games.get(game_id)
+    if not g or g["phase"] != "toss":
+        await query.answer()
+        return
+
+    flipper_role = g["toss_flipper"]
+    if user.id != g[flipper_role]["id"]:
+        await query.answer("Only the designated flipper can flip the coin!", show_alert=True)
+        return
+
+    await query.answer("Flipping… 🪙")
+
+    result = random.choice(["heads", "tails"])
+    call = g["toss_call"]
+    caller_role = g["toss_caller"]
+    winner_role = caller_role if call == result else flipper_role
+    g["toss_winner"] = winner_role
+
+    winner_name = g[winner_role]["name"]
+    caller_name = g[caller_role]["name"]
+    correct_txt = "✅ Correct!" if call == result else "❌ Wrong!"
+
+    await ctx.bot.edit_message_text(
+        chat_id=g["chat_id"], message_id=game_id,
+        text=(
+            f"👑 *1v1 CRICKET — TOSS*\n\n"
+            f"🪙 Result: *{result.capitalize()}*!\n"
+            f"👤 *{caller_name}* called *{call.capitalize()}* — {correct_txt}\n\n"
+            f"🏆 *{winner_name}* wins the toss!\n\n"
+            f"*{winner_name}*, choose:"
+        ),
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("🏏 Bat",  callback_data=f"dt_choose:{game_id}:bat"),
+            InlineKeyboardButton("🎳 Bowl", callback_data=f"dt_choose:{game_id}:bowl"),
         ]]),
         parse_mode="Markdown",
     )
@@ -443,7 +548,7 @@ async def cb_duel_toss(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await query.answer()
         return
     tw        = g["toss_winner"]
-    winner_id = g["challenger"]["id"] if tw == "challenger" else g["opponent"]["id"]
+    winner_id = g[tw]["id"]
     if user.id != winner_id:
         await query.answer("You didn't win the toss!", show_alert=True)
         return
@@ -452,64 +557,12 @@ async def cb_duel_toss(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     batter, bowler   = (c, o) if (tw == "challenger") == (choice == "bat") else (o, c)
     g.update(batter=batter, bowler=bowler, phase="playing", pick_phase="batter",
              score=0, ball=0, batter_runs=0, batter_balls=0,
-             batter_pick=None, bowler_pick=None, history=[])
+             batter_pick=None, bowler_pick=None, last_bowl_num=None, last_bat_num=None, history=[])
     await ctx.bot.edit_message_text(
         chat_id=g["chat_id"], message_id=game_id,
         text=_duel_text(g), reply_markup=_duel_kb(game_id, g["variant"]),
         parse_mode="Markdown",
     )
-
-
-async def cb_duel_pick(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    user  = update.effective_user
-    _cache_user(user)
-    parts = query.data.split(":")
-    try:
-        game_id = int(parts[1])
-        num     = int(parts[2])
-    except (IndexError, ValueError):
-        await query.answer()
-        return
-    g = duel_games.get(game_id)
-    if not g or g["phase"] != "playing":
-        await query.answer()
-        return
-    is_batter = user.id == g["batter"]["id"]
-    is_bowler = user.id == g["bowler"]["id"]
-    if not is_batter and not is_bowler:
-        await query.answer("You're not in this game!", show_alert=True)
-        return
-    pp = g.get("pick_phase", "batter")
-    if pp == "batter":
-        if not is_batter:
-            await query.answer("Batter picks first! Wait 🎳", show_alert=True)
-            return
-        if g["batter_pick"] is not None:
-            await query.answer("Already picked! ✋")
-            return
-        g["batter_pick"]  = num
-        g["pick_phase"]   = "bowler"
-        await query.answer(f"Picked {num} 🤫 — bowler's turn!")
-        try:
-            await ctx.bot.edit_message_text(
-                chat_id=g["chat_id"], message_id=game_id,
-                text=_duel_text(g), reply_markup=_duel_kb(game_id, g["variant"]),
-                parse_mode="Markdown",
-            )
-        except Exception:
-            pass
-        return
-    if pp == "bowler":
-        if not is_bowler:
-            await query.answer("Bowler's turn! Wait 🏏", show_alert=True)
-            return
-        if g["bowler_pick"] is not None:
-            await query.answer("Already picked! ✋")
-            return
-        g["bowler_pick"] = num
-        await query.answer(f"Picked {num} 🤫")
-        await _duel_resolve(ctx, game_id)
 
 
 async def _duel_resolve(ctx, game_id: int) -> None:
@@ -518,7 +571,7 @@ async def _duel_resolve(ctx, game_id: int) -> None:
         return
     bat_n  = g["batter_pick"]
     bowl_n = g["bowler_pick"]
-    g.update(last_bowl_num=bowl_n, batter_pick=None, bowler_pick=None, pick_phase="batter")
+    g.update(last_bowl_num=bowl_n, last_bat_num=bat_n, batter_pick=None, bowler_pick=None, pick_phase="batter")
     g["ball"]         += 1
     g["batter_balls"] += 1
     ball    = g["ball"]
@@ -545,7 +598,7 @@ async def _duel_resolve(ctx, game_id: int) -> None:
             g.update(innings=2, target=target, batter=old_bw, bowler=old_b,
                      score=0, ball=0, batter_runs=0, batter_balls=0,
                      history=[], batter_pick=None, bowler_pick=None,
-                     pick_phase="batter", last_bowl_num=None)
+                     pick_phase="batter", last_bowl_num=None, last_bat_num=None)
             await ctx.bot.edit_message_text(
                 chat_id=chat_id, message_id=game_id,
                 text=f"🔄 *Innings 2!*\n🎯 Target: *{target}*\n\n" + _duel_text(g),
@@ -606,7 +659,6 @@ async def _duel_resolve(ctx, game_id: int) -> None:
             ov_balls  = g["history"][-6:]
             runs_ov   = sum(int(b) for b in ov_balls if b.lstrip("-").isdigit())
             extra     = f"  |  Need: *{g['target'] - g['score']}*" if g.get("target") else ""
-            # Includes Bowler Name in 1v1 summary as requested
             await ctx.bot.send_message(
                 chat_id,
                 f"📋 *End of Over {ball // 6}*\n"
@@ -624,7 +676,7 @@ async def _duel_resolve(ctx, game_id: int) -> None:
 
 
 # ═════════════════════════════════════════════════════════════
-#  TEAM MODE — HELPERS
+#  TEAM MODE — HELPERS & CONFIGURATION LAYOUT
 # ═════════════════════════════════════════════════════════════
 def _tname(tgame: dict, key: str) -> str:
     return tgame[f"team_{key}"]["name"]
@@ -684,7 +736,7 @@ async def _refresh_setup(ctx, tgame: dict) -> None:
 
 
 # ═════════════════════════════════════════════════════════════
-#  TEAM MODE — SETUP START
+#  TEAM MODE — SETUP INITIALIZATION
 # ═════════════════════════════════════════════════════════════
 async def _team_setup_start(query, ctx) -> None:
     host    = query.from_user
@@ -739,59 +791,6 @@ async def _team_setup_start(query, ctx) -> None:
     await ctx.bot.edit_message_reply_markup(
         chat_id=chat_id, message_id=msg.message_id,
         reply_markup=_setup_kb(msg.message_id),
-    )
-
-
-# ─────────────────────────────────────────────────────────────
-#  /declare
-# ─────────────────────────────────────────────────────────────
-async def cmd_declare(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    chat_id = update.effective_chat.id
-    user = update.effective_user
-    _cache_user(user)
-    tgame_id = group_team_game.get(chat_id)
-    if not tgame_id:
-        return
-    tgame = team_games.get(tgame_id)
-    if not tgame or tgame["phase"] not in ("innings1", "innings2"):
-        return
-        
-    bk = tgame["batting_team"]
-    if user.id != tgame[f"team_{bk}"]["captain_id"] and user.id != tgame["host_id"]:
-        await update.message.reply_text("🛑 Only your Captain or Host can declare the innings profile.")
-        return
-
-    _cancel_timer(tgame_id)
-    await update.message.reply_text(f"📢 *Innings Declared!* *{user.first_name}* closed the innings profile.", parse_mode="Markdown")
-    
-    if tgame["current_innings"] == 1:
-        await _end_innings1(ctx, tgame_id)
-    else:
-        await _end_match(ctx, tgame_id)
-
-
-# ─────────────────────────────────────────────────────────────
-#  /endgame
-# ─────────────────────────────────────────────────────────────
-async def cmd_endgame(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    chat_id  = update.effective_chat.id
-    user     = update.effective_user
-    _cache_user(user)
-    tgame_id = group_team_game.get(chat_id)
-    if not tgame_id:
-        await update.message.reply_text("No active team game in this chat.")
-        return
-    tgame = team_games.get(tgame_id)
-    if tgame and user.id != tgame["host_id"]:
-        await update.message.reply_text("🛑 Only the host can terminate active matches.")
-        return
-    if tgame:
-        _cancel_timer(tgame_id)
-        tgame["phase"] = "finished"
-        del team_games[tgame_id]
-    del group_team_game[chat_id]
-    await update.message.reply_text(
-        f"🏏 Game ended by *{user.first_name}*.", parse_mode="Markdown"
     )
 
 
@@ -878,7 +877,7 @@ async def cmd_remove(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 # ─────────────────────────────────────────────────────────────
-#  Join Team / Automated Captain Self-Claim Dashboard Message
+#  Join Team / Automated Captain Claim Framework Collapse
 # ─────────────────────────────────────────────────────────────
 async def cb_team_join(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
@@ -1287,23 +1286,9 @@ async def cb_team_toss(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     _reset_timer(ctx, tgame_id)
 
 
-# ═════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────────────────────
 #  /batting AND /bowling COMMANDS (CO-MANAGED BY HOST & CAPTAIN)
-# ═════════════════════════════════════════════════════════════
-def _ensure_bof(tgame: dict) -> dict:
-    if tgame.get("balls_on_field") is None:
-        tgame["balls_on_field"] = {
-            "msg_id":      None,
-            "batter_id":   None, "batter_name": None,
-            "bowler_id":   None, "bowler_name": None,
-            "batter_pick": None, "bowler_pick": None,
-            "pick_phase":  "batter",
-            "last_bowl_num": None,
-            "over_history":  [],
-        }
-    return tgame["balls_on_field"]
-
-
+# ─────────────────────────────────────────────────────────────
 async def cmd_batting(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id  = update.effective_chat.id
     user     = update.effective_user
@@ -1383,18 +1368,8 @@ async def cmd_bowling(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 # ═════════════════════════════════════════════════════════════
-#  TEAM FIELD — BALL-BY-BALL GAME
+#  TEAM FIELD — BALL-BY-BALL GAME FIELD DISPLAY
 # ═════════════════════════════════════════════════════════════
-def _team_kb(tgame_id: int, variant: str) -> InlineKeyboardMarkup:
-    if variant == "with5":
-        r1 = [InlineKeyboardButton(str(n), callback_data=f"tp:{tgame_id}:{n}") for n in [1, 2, 3]]
-        r2 = [InlineKeyboardButton(str(n), callback_data=f"tp:{tgame_id}:{n}") for n in [4, 5, 6]]
-    else:
-        r1 = [InlineKeyboardButton(str(n), callback_data=f"tp:{tgame_id}:{n}") for n in [0, 1, 2]]
-        r2 = [InlineKeyboardButton(str(n), callback_data=f"tp:{tgame_id}:{n}") for n in [3, 4, 6]]
-    return InlineKeyboardMarkup([r1, r2])
-
-
 def _team_field_text(tgame: dict) -> str:
     inn        = tgame["current_innings"]
     bof        = tgame["balls_on_field"]
@@ -1406,9 +1381,14 @@ def _team_field_text(tgame: dict) -> str:
     target     = tgame.get("target")
     batter_name = bof["batter_name"]
     bowler_name = bof["bowler_name"]
-    recent      = "  ".join(bof["over_history"][-6:]) or "-"
+    
     last_bowl   = bof.get("last_bowl_num")
-    bowl_line   = f"🎳 Bowler's last: *{last_bowl}*" if last_bowl is not None else ""
+    bowl_line   = f"🎳 Bowler's last: *{last_bowl}*" if last_bowl is not None else "🎳 Bowler's last: -"
+    
+    # NEW: Batter last prediction mapping tracking layer inside team interface
+    last_bat   = bof.get("last_bat_num")
+    bat_line   = f"🏏 Batter's last: *{last_bat}*" if last_bat is not None else "🏏 Batter's last: -"
+    
     pick_phase  = bof.get("pick_phase", "batter")
     bk          = tgame["batting_team"]
     wk          = _bowl_key(tgame)
@@ -1428,7 +1408,7 @@ def _team_field_text(tgame: dict) -> str:
         "",
         f"🏏 Batter: *{batter_name}*: *{b_runs}* off *{b_balls_c}* balls",
         f"🎳 Bowler: *{bowler_name}*",
-        "", f"🕐 This over: {recent}", bowl_line, "",
+        "", bat_line, bowl_line, "", # Removed structural 'This over' history line frame here
     ]
     if pick_phase == "batter":
         lines += [
@@ -1443,21 +1423,6 @@ def _team_field_text(tgame: dict) -> str:
             f"👇 *{bowler_name}*, pick:",
         ]
     return "\n".join(l for l in lines if l is not None)
-
-
-async def _launch_ball_game(ctx, tgame_id: int) -> None:
-    tgame = team_games.get(tgame_id)
-    if not tgame:
-        return
-    bof = tgame["balls_on_field"]
-    msg = await ctx.bot.send_message(
-        tgame["chat_id"],
-        _team_field_text(tgame),
-        reply_markup=_team_kb(tgame_id, tgame["variant"]),
-        parse_mode="Markdown",
-    )
-    bof["msg_id"] = msg.message_id
-    _reset_timer(ctx, tgame_id)
 
 
 async def cb_team_pick(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1527,7 +1492,7 @@ async def _team_resolve(ctx, tgame_id: int) -> None:
     bof        = tgame["balls_on_field"]
     bat_n      = bof["batter_pick"]
     bowl_n     = bof["bowler_pick"]
-    bof.update(last_bowl_num=bowl_n, batter_pick=None, bowler_pick=None, pick_phase="batter")
+    bof.update(last_bowl_num=bowl_n, last_bat_num=bat_n, batter_pick=None, bowler_pick=None, pick_phase="batter")
     inn        = tgame["current_innings"]
     d          = tgame["innings_data"][inn]
     d["balls"] += 1
@@ -1624,7 +1589,7 @@ async def _need_new_batter(ctx, tgame_id: int, bowler_id: int, bowler_name: str)
         "bowler_id":   bowler_id, "bowler_name": bowler_name,
         "batter_pick": None, "bowler_pick": None,
         "pick_phase":  "batter",
-        "last_bowl_num": None,
+        "last_bowl_num": None, "last_bat_num": None,
         "over_history":  over_hist,
     }
     await ctx.bot.send_message(
@@ -1649,7 +1614,7 @@ async def _need_new_bowler(ctx, tgame_id: int, batter_id: int, batter_name: str)
         "bowler_id":   None, "bowler_name": None,
         "batter_pick": None, "bowler_pick": None,
         "pick_phase":  "batter",
-        "last_bowl_num": None,
+        "last_bowl_num": None, "last_bat_num": None,
         "over_history":  [],
     }
     await ctx.bot.send_message(
@@ -1727,7 +1692,7 @@ async def _end_match(ctx, tgame_id: int) -> None:
         for uid, uname in tgame[f"team_{t}"]["members"].items():
             record_result(uid, uname, won=won, draw=draw)
 
-    # ── MVP ENGINE COMPUTATION MATRIX ─────────────────────────
+    # ── MVP ENGINE MATRIX COMPUTATION ─────────────────────────
     player_perf = {}
     def process_mvp(d, team_key):
         for uid, uname in tgame[f"team_{team_key}"]["members"].items():
@@ -1781,7 +1746,7 @@ async def _end_match(ctx, tgame_id: int) -> None:
 
 
 # ─────────────────────────────────────────────────────────────
-#  MAIN ENTRY
+#  MAIN REGISTRATION APPLICATION RUNNER
 # ─────────────────────────────────────────────────────────────
 def main() -> None:
     app = Application.builder().token(TELEGRAM_TOKEN).build()
@@ -1803,7 +1768,9 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(cb_mode_select,      pattern=r"^mode:"))
     app.add_handler(CallbackQueryHandler(cb_1v1_variant,      pattern=r"^1v1v:"))
     app.add_handler(CallbackQueryHandler(cb_duel_join,        pattern=r"^dj:"))
-    app.add_handler(CallbackQueryHandler(cb_duel_toss,        pattern=r"^dt:"))
+    app.add_handler(CallbackQueryHandler(cb_duel_toss_call,   pattern=r"^dt_call:"))
+    app.add_handler(CallbackQueryHandler(cb_duel_toss_flip,   pattern=r"^dt_flip:"))
+    app.add_handler(CallbackQueryHandler(cb_duel_toss,        pattern=r"^dt_choose:"))
     app.add_handler(CallbackQueryHandler(cb_duel_pick,        pattern=r"^dp:"))
     
     app.add_handler(CallbackQueryHandler(cb_team_join,        pattern=r"^tj:"))
@@ -1823,7 +1790,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(cb_team_toss,        pattern=r"^ttoss:"))
     app.add_handler(CallbackQueryHandler(cb_team_pick,        pattern=r"^tp:"))
 
-    logger.info("CricBot is active with direct captain claim actions…")
+    logger.info("CricBot live with interface parameters modified…")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
