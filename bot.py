@@ -1236,12 +1236,21 @@ async def cmd_batting(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not tgame or tgame["phase"] not in ("innings1", "innings2"):
         return
     bk = tgame["batting_team"]
+    
+    # Check if authorization rules still pass (see questions below)
     if user.id != tgame[f"team_{bk}"]["captain_id"] and user.id != tgame["host_id"]:
         await update.message.reply_text("Only the batting captain or host can assign a batter.")
         return
-    target_id, target_name = _resolve_mention(update.message)
+
+    # ── NEW "ME" LOGIC ────────────────────────────────────────
+    if ctx.args and ctx.args[0].lower() == "me":
+        target_id, target_name = user.id, user.first_name
+    else:
+        target_id, target_name = _resolve_mention(update.message)
+    # ──────────────────────────────────────────────────────────
+
     if not target_id:
-        await update.message.reply_text("Please mention a player: /batting @username")
+        await update.message.reply_text("Please mention a player or use 'me': /batting @username or /batting me")
         return
     if target_id not in tgame[f"team_{bk}"]["members"]:
         await update.message.reply_text(
@@ -1256,7 +1265,6 @@ async def cmd_batting(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if bof["batter_id"] and bof["bowler_id"]:
         await _launch_ball_game(ctx, tgame_id)
 
-
 async def cmd_bowling(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id  = update.effective_chat.id
     user     = update.effective_user
@@ -1268,12 +1276,21 @@ async def cmd_bowling(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not tgame or tgame["phase"] not in ("innings1", "innings2"):
         return
     wk = _bowl_key(tgame)
+    
+    # Check if authorization rules still pass
     if user.id != tgame[f"team_{wk}"]["captain_id"] and user.id != tgame["host_id"]:
         await update.message.reply_text("Only the bowling captain or host can assign a bowler.")
         return
-    target_id, target_name = _resolve_mention(update.message)
+
+    # ── NEW "ME" LOGIC ────────────────────────────────────────
+    if ctx.args and ctx.args[0].lower() == "me":
+        target_id, target_name = user.id, user.first_name
+    else:
+        target_id, target_name = _resolve_mention(update.message)
+    # ──────────────────────────────────────────────────────────
+
     if not target_id:
-        await update.message.reply_text("Please mention a player: /bowling @username")
+        await update.message.reply_text("Please mention a player or use 'me': /bowling @username or /bowling me")
         return
     if target_id not in tgame[f"team_{wk}"]["members"]:
         await update.message.reply_text(
