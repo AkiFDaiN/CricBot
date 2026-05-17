@@ -50,7 +50,7 @@ player_stats: dict[int, dict] = {}
 
 def get_profile(user_id: int, name: str) -> dict:
     if user_id not in player_stats:
-        player_stats[user_id] = {"name\n": name, "wins\n": 0, "losses\n": 0, "draws\n": 0, "games": 0}
+        player_stats[user_id] = {"name": name, "wins": 0, "losses": 0, "draws": 0, "games": 0}
     else:
         player_stats[user_id]["name"] = name
         player_stats[user_id].setdefault("draws", 0)
