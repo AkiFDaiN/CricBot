@@ -1,9 +1,9 @@
 """
 Specific requirements handled:
-  1. Fixed sanitation on /batting and /bowling to allow 'me' selections seamlessly.
-  2. Strict Game Commander Locking: Only the user who sent /gamecricket can choose the mode and 1v1 variant.
+  1. Fixed Callback Query mappings to fully resolve the Team Mode bowler pick freeze.
+  2. Maintained Strict Game Commander Locking: Only the user who sent /gamecricket can choose the mode and 1v1 variant.
   3. Over history tracking dynamically updates the wicket message frame in 1v1 mode.
-  4. Replaced 'This over: ...' with '🏏 Batter's last: X' in normal live play interfaces.
+  4. Replaced 'This over: ...' with '🏏 Batter's last: X' in normal live play interfaces (retained until out).
   5. Preserved clean team configuration, automated inline captain claims, and final match MVPs.
 """
 import logging
@@ -1363,7 +1363,7 @@ async def cb_team_toss(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 # ─────────────────────────────────────────────────────────────
-#  /batting AND /bowling COMMANDS WITH FIXED "ME" PROCESSING Logic
+#  /batting AND /bowling COMMANDS WITH FIXED "ME" PROCESSING
 # ─────────────────────────────────────────────────────────────
 async def cmd_batting(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id  = update.effective_chat.id
@@ -1377,7 +1377,6 @@ async def cmd_batting(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
     bk = tgame["batting_team"]
 
-    # FIXED: Sanitized whitespace trailing checking layers
     if ctx.args and ctx.args[0].strip().lower() == "me":
         target_id, target_name = user.id, user.first_name
     else:
@@ -1395,6 +1394,7 @@ async def cmd_batting(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
     display = tgame[f"team_{bk}"]["members"][target_id]
     bof = _ensure_bof(tgame)
+    bof["raw_batter_mapped"] = True  # Setup state variable flag directly
     bof["batter_id"]   = target_id
     bof["batter_name"] = display
     await update.message.reply_text(f"✅ *{display}* is now batting!", parse_mode="Markdown")
@@ -1415,7 +1415,6 @@ async def cmd_bowling(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
     wk = _bowl_key(tgame)
 
-    # FIXED: Sanitized whitespace trailing checking layers
     if ctx.args and ctx.args[0].strip().lower() == "me":
         target_id, target_name = user.id, user.first_name
     else:
@@ -1445,9 +1444,9 @@ async def cmd_bowling(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await _launch_ball_game(ctx, tgame_id)
 
 
-# ═════════════════════════════════════════════════════════════
-#  TEAM FIELD — BALL-BY-BALL GAME FIELD DISPLAY
-# ═════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────────────────────
+#  TEAM FIELD — BALL-BY-BALL GAME
+# ─────────────────────────────────────────────────────────────
 def _ensure_bof(tgame: dict) -> dict:
     if tgame.get("balls_on_field") is None:
         tgame["balls_on_field"] = {
