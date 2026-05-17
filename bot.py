@@ -1,6 +1,6 @@
 """
 Specific requirements handled:
-  1. Restored missing 'cmd_endgame' function to resolve NameError crash.
+  1. Restored missing 'cmd_batting', 'cmd_bowling', and 'cb_duel_pick' structures.
   2. Removed 'This over: ...' from live 1v1 and Team Mode button panels.
   3. Replaced with '🏏 Batter's last: X' to map immediate previous ball runs.
   4. Interactive 3-step tosses symmetrically balanced across modes.
@@ -564,9 +564,56 @@ async def cb_duel_toss(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
-async def _duel_pick(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    # Retained via local context binding maps
-    pass
+async def cb_duel_pick(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    user  = update.effective_user
+    _cache_user(user)
+    parts = query.data.split(":")
+    try:
+        game_id = int(parts[1])
+        num     = int(parts[2])
+    except (IndexError, ValueError):
+        await query.answer()
+        return
+    g = duel_games.get(game_id)
+    if not g or g["phase"] != "playing":
+        await query.answer()
+        return
+    is_batter = user.id == g["batter"]["id"]
+    is_bowler = user.id == g["bowler"]["id"]
+    if not is_batter and not is_bowler:
+        await query.answer("You're not in this game!", show_alert=True)
+        return
+    pp = g.get("pick_phase", "batter")
+    if pp == "batter":
+        if not is_batter:
+            await query.answer("Batter picks first! Wait 🎳", show_alert=True)
+            return
+        if g["batter_pick"] is not None:
+            await query.answer("Already picked! ✋")
+            return
+        g["batter_pick"] = num
+        g["pick_phase"]  = "bowler"
+        await query.answer(f"Picked {num} 🤫 — bowler's turn!")
+        try:
+            await ctx.bot.edit_message_text(
+                chat_id=g["chat_id"], message_id=game_id,
+                text=_duel_text(g), reply_markup=_duel_kb(game_id, g["variant"]),
+                parse_mode="Markdown",
+            )
+        except Exception:
+            pass
+        return
+    if pp == "bowler":
+        if not is_bowler:
+            await query.answer("Bowler's turn! Wait 🏏", show_alert=True)
+            return
+        if g["bowler_pick"] is not None:
+            await query.answer("Already picked! ✋")
+            return
+        g["bowler_pick"] = num
+        await query.answer(f"Picked {num} 🤫")
+        await _duel_resolve(ctx, game_id)
 
 
 # ═════════════════════════════════════════════════════════════
@@ -903,7 +950,7 @@ async def cb_team_claim_cap(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> N
     
     await query.answer("Captain status successfully updated!")
     await query.edit_message_text(
-        text=f"✅ *user.first_name* is the captain of *{_tname(tgame, team)}*!",
+        text=f"✅ *{user.first_name}* is the captain of *{_tname(tgame, team)}*!",
         reply_markup=None,
         parse_mode="Markdown"
     )
@@ -1233,6 +1280,87 @@ async def cb_team_toss(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     _reset_timer(ctx, tgame_id)
 
 
+# ─────────────────────────────────────────────────────────────
+#  /batting AND /bowling COMMANDS (CO-MANAGED BY HOST & CAPTAIN)
+# ─────────────────────────────────────────────────────────────
+async def cmd_batting(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id  = update.effective_chat.id
+    user     = update.effective_user
+    _cache_user(user)
+    tgame_id = group_team_game.get(chat_id)
+    if not tgame_id:
+        return
+    tgame = team_games.get(tgame_id)
+    if not tgame or tgame["phase"] not in ("innings1", "innings2"):
+        return
+    bk = tgame["batting_team"]
+
+    if ctx.args and ctx.args[0].lower() == "me":
+        target_id, target_name = user.id, user.first_name
+    else:
+        if user.id != tgame[f"team_{bk}"]["captain_id"] and user.id != tgame["host_id"]:
+            await update.message.reply_text("🛑 Lineups can only be mapped by your Team Captain or the Game Host.")
+            return
+        target_id, target_name = _resolve_mention(update.message)
+
+    if not target_id:
+        await update.message.reply_text("Please mention a player or use 'me': /batting @username or /batting me")
+        return
+    if target_id not in tgame[f"team_{bk}"]["members"]:
+        await update.message.reply_text(f"*{target_name}* is not in *{_tname(tgame, bk)}*!", parse_mode="Markdown")
+        return
+
+    display = tgame[f"team_{bk}"]["members"][target_id]
+    bof = _ensure_bof(tgame)
+    bof["batter_id"]   = target_id
+    bof["batter_name"] = display
+    await update.message.reply_text(f"✅ *{display}* is now batting!", parse_mode="Markdown")
+    
+    if bof["batter_id"] and bof["bowler_id"]:
+        await _launch_ball_game(ctx, tgame_id)
+
+
+async def cmd_bowling(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id  = update.effective_chat.id
+    user     = update.effective_user
+    _cache_user(user)
+    tgame_id = group_team_game.get(chat_id)
+    if not tgame_id:
+        return
+    tgame = team_games.get(tgame_id)
+    if not tgame or tgame["phase"] not in ("innings1", "innings2"):
+        return
+    wk = _bowl_key(tgame)
+
+    if ctx.args and ctx.args[0].lower() == "me":
+        target_id, target_name = user.id, user.first_name
+    else:
+        if user.id != tgame[f"team_{wk}"]["captain_id"] and user.id != tgame["host_id"]:
+            await update.message.reply_text("🛑 Lineups can only be mapped by your Team Captain or the Game Host.")
+            return
+        target_id, target_name = _resolve_mention(update.message)
+
+    if not target_id:
+        await update.message.reply_text("Please mention a player or use 'me': /bowling @username or /bowling me")
+        return
+    if target_id not in tgame[f"team_{wk}"]["members"]:
+        await update.message.reply_text(f"*{target_name}* is not in *{_tname(tgame, wk)}*!", parse_mode="Markdown")
+        return
+    if target_id in tgame.get("prev_bowlers", set()):
+        display = tgame[f"team_{wk}"]["members"][target_id]
+        await update.message.reply_text(f"⚠️ *{display}* bowled the last over. Choose a different bowler.", parse_mode="Markdown")
+        return
+
+    display = tgame[f"team_{wk}"]["members"][target_id]
+    bof = _ensure_bof(tgame)
+    bof["bowler_id"]   = target_id
+    bof["bowler_name"] = display
+    await update.message.reply_text(f"✅ *{display}* is now bowling!", parse_mode="Markdown")
+    
+    if bof["batter_id"] and bof["bowler_id"]:
+        await _launch_ball_game(ctx, tgame_id)
+
+
 # ═════════════════════════════════════════════════════════════
 #  TEAM FIELD — BALL-BY-BALL GAME FIELD DISPLAY
 # ═════════════════════════════════════════════════════════════
@@ -1288,66 +1416,6 @@ def _team_field_text(tgame: dict) -> str:
             f"👇 *{bowler_name}*, pick:",
         ]
     return "\n".join(l for l in lines if l is not None)
-
-
-async def cb_team_pick(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    user  = update.effective_user
-    _cache_user(user)
-    parts = query.data.split(":")
-    try:
-        tgame_id = int(parts[1])
-        num      = int(parts[2])
-    except (IndexError, ValueError):
-        await query.answer()
-        return
-    tgame = team_games.get(tgame_id)
-    if not tgame:
-        await query.answer()
-        return
-    bof = tgame.get("balls_on_field")
-    if not bof or not bof.get("msg_id") or query.message.message_id != bof["msg_id"]:
-        await query.answer("This play sequence has expired or been replaced.")
-        return
-        
-    is_batter = user.id == bof["batter_id"]
-    is_bowler = user.id == bof["bowler_id"]
-    if not is_batter and not is_bowler:
-        await query.answer("You're not batting or bowling right now!", show_alert=True)
-        return
-        
-    pp = bof.get("pick_phase", "batter")
-    if pp == "batter":
-        if not is_batter:
-            await query.answer("Batter picks first! Wait 🎳", show_alert=True)
-            return
-        if bof["batter_pick"] is not None:
-            await query.answer("Already picked! ✋")
-            return
-        bof["batter_pick"] = num
-        bof["pick_phase"]  = "bowler"
-        await query.answer(f"Picked {num} 🤫 — bowler's turn!")
-        _reset_timer(ctx, tgame_id)
-        try:
-            await ctx.bot.edit_message_text(
-                chat_id=tgame["chat_id"], message_id=bof["msg_id"],
-                text=_team_field_text(tgame), reply_markup=_team_kb(tgame_id, tgame["variant"]),
-                parse_mode="Markdown",
-            )
-        except Exception:
-            pass
-        return
-    if pp == "bowler":
-        if not is_bowler:
-            await query.answer("Bowler's turn! Wait 🏏", show_alert=True)
-            return
-        if bof["bowler_pick"] is not None:
-            await query.answer("Already picked! ✋")
-            return
-        bof["bowler_pick"] = num
-        await query.answer(f"Picked {num} 🤫")
-        await _cancel_timer(tgame_id)
-        await _team_resolve(ctx, tgame_id)
 
 
 async def _team_resolve(ctx, tgame_id: int) -> None:
@@ -1439,6 +1507,66 @@ async def _team_resolve(ctx, tgame_id: int) -> None:
             _reset_timer(ctx, tgame_id)
         except Exception:
             pass
+
+
+async def cb_team_pick(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    user  = update.effective_user
+    _cache_user(user)
+    parts = query.data.split(":")
+    try:
+        tgame_id = int(parts[1])
+        num      = int(parts[2])
+    except (IndexError, ValueError):
+        await query.answer()
+        return
+    tgame = team_games.get(tgame_id)
+    if not tgame:
+        await query.answer()
+        return
+    bof = tgame.get("balls_on_field")
+    if not bof or not bof.get("msg_id") or query.message.message_id != bof["msg_id"]:
+        await query.answer("This play sequence has expired or been replaced.")
+        return
+        
+    is_batter = user.id == bof["batter_id"]
+    is_bowler = user.id == bof["bowler_id"]
+    if not is_batter and not is_bowler:
+        await query.answer("You're not batting or bowling right now!", show_alert=True)
+        return
+        
+    pp = bof.get("pick_phase", "batter")
+    if pp == "batter":
+        if not is_batter:
+            await query.answer("Batter picks first! Wait 🎳", show_alert=True)
+            return
+        if bof["batter_pick"] is not None:
+            await query.answer("Already picked! ✋")
+            return
+        bof["batter_pick"] = num
+        bof["pick_phase"]  = "bowler"
+        await query.answer(f"Picked {num} 🤫 — bowler's turn!")
+        _reset_timer(ctx, tgame_id)
+        try:
+            await ctx.bot.edit_message_text(
+                chat_id=tgame["chat_id"], message_id=bof["msg_id"],
+                text=_team_field_text(tgame), reply_markup=_team_kb(tgame_id, tgame["variant"]),
+                parse_mode="Markdown",
+            )
+        except Exception:
+            pass
+        return
+    if pp == "bowler":
+        if not is_bowler:
+            await query.answer("Bowler's turn! Wait 🏏", show_alert=True)
+            return
+        if bof["bowler_pick"] is not None:
+            await query.answer("Already picked! ✋")
+            return
+        bof["bowler_pick"] = num
+        await query.answer(f"Picked {num} 🤫")
+        await _cancel_timer(tgame_id)
+        await _team_resolve(ctx, tgame_id)
 
 
 async def _need_new_batter(ctx, tgame_id: int, bowler_id: int, bowler_name: str) -> None:
@@ -1636,7 +1764,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(cb_duel_toss_call,   pattern=r"^dt_call:"))
     app.add_handler(CallbackQueryHandler(cb_duel_toss_flip,   pattern=r"^dt_flip:"))
     app.add_handler(CallbackQueryHandler(cb_duel_toss,        pattern=r"^dt_choose:"))
-    app.add_handler(CallbackQueryHandler(cb_team_pick,        pattern=r"^tp:"))
+    app.add_handler(CallbackQueryHandler(cb_duel_pick,        pattern=r"^dp:"))
     
     app.add_handler(CallbackQueryHandler(cb_team_join,        pattern=r"^tj:"))
     app.add_handler(CallbackQueryHandler(cb_team_claim_cap,   pattern=r"^tclaim_cap:"))
@@ -1653,6 +1781,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(cb_team_toss_call,   pattern=r"^ttoss_call:"))
     app.add_handler(CallbackQueryHandler(cb_team_toss_flip,   pattern=r"^ttoss_flip:"))
     app.add_handler(CallbackQueryHandler(cb_team_toss,        pattern=r"^ttoss:"))
+    app.add_handler(CallbackQueryHandler(cb_team_pick,        pattern=r"^tp:"))
 
     logger.info("CricBot is active with direct captain claim actions…")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
